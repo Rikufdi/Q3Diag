@@ -187,6 +187,8 @@ python tools/cell.py linktest                   # add --no-beep to silence it
 python tools/cell.py watch <run_id> 10 --beep
 ```
 
+![Live dashboard for a running `monitor` session](docs/dashboard.jpg)
+
 The PC chime plays through the standard Windows audio (multimedia) path, so it should reach whatever
 your default playback device is, however unusual the setup. Both commands also accept
 `--headset-beep`, but be aware of what it actually does: this Horizon OS build's `cmd notification post`
