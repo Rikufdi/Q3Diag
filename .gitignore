@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Quest 3 diagnostics -- what stays out of git, and why.
+# ---------------------------------------------------------------------------
+
+# Wire captures: 30-120 MB per run, no textual diff value, regenerable by re-running a cell.
+runs/**/cap.pcapng
+runs/**/cap.etl
+
+# 2.7 GB 4K60 test pattern. Regenerate locally (see README "Test content").
+test-content/pattern-4k60.mp4
+
+# Machine-bound credentials: Virtual Desktop's DPAPI blobs (ProtectedComputerID,
+# Accounts.OculusQuest) are user+machine scoped secrets. Never publish.
+**/pc_config.json
+
+# This rig's profile: real paths, IPs, SSIDs. Tracked template is site.example.json.
+tools/site.json
+
+# Harness runtime state (written while a cell runs).
+tools/current_run_id.txt
+tools/elev-cmd.txt
+tools/elev-do-cmd.txt
+tools/elev-res.txt
+tools/elev-do-res.txt
+tools/elev-setup-log.txt
+tools/*.log
+
+# Raw adb device dumps: regenerate with tools/Quest-Probe.ps1. They carry the
+# headset serial/MACs and neighbors' SSIDs/BSSIDs from scan lists.
+probe/**/raw/
+probe/**/*-raw/
+
+# AP administration screenshot with the Wi-Fi passphrase rendered in plaintext.
+topology/ap-radio.png
+
+# Third-party aarch64 Android build of iperf3 (BSD-3-Clause). Fetch or build your own.
+tools/iperf3.*
+
+# Python
+__pycache__/
+*.py[cod]

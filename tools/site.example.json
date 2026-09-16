@@ -1,0 +1,22 @@
+{
+  "_comment": "Copy to tools/site.json and fill in for your rig. Empty string = auto-discover (PATH / standard install dirs) then fail with instructions. Any key can also be overridden per-invocation with QUEST3_<KEY>, e.g. QUEST3_QUEST_IP=192.0.2.10.",
+
+  "base_dir": "",
+  "quest_ip": "",
+  "pc_ip": "",
+  "pc_nic": "",
+
+  "adb": "",
+  "python": "",
+  "tshark": "",
+  "pktmon": "",
+  "ffprobe": "",
+
+  "vd_streamer_exe": "",
+  "vd_settings_json": "",
+  "ovr_server_exe": "",
+  "vd_switcher_exe": "",
+  "ovr_metrics_dir": "/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics",
+
+  "elev_task": "PCVR-Elev"
+}

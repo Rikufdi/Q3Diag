@@ -1,0 +1,32 @@
+Measurement data and written analysis in this repository are licensed under the
+Creative Commons Attribution 4.0 International License (CC BY 4.0).
+
+You are free to:
+
+  Share  -- copy and redistribute the material in any medium or format
+  Adapt  -- remix, transform, and build upon the material for any purpose,
+            even commercially
+
+Under the following terms:
+
+  Attribution -- You must give appropriate credit, provide a link to the
+                 license, and indicate if changes were made. You may do so in
+                 any reasonable manner, but not in any way that suggests the
+                 licensor endorses you or your use.
+
+  No additional restrictions -- You may not apply legal terms or technological
+                 measures that legally restrict others from doing anything the
+                 license permits.
+
+This covers: `report.md`, `findings.md`, `results.csv`, `instrumentation.json`,
+`runs/**`, `probe/**`, `baseline/**`, `topology/**`, and the data/documentation
+parts of `tools/` (for example `QUEST-AGENT-PLAYBOOK.md`, `vd-codec-enum.md`).
+
+The harness source code is licensed separately under MIT -- see LICENSE.
+
+Full license text: https://creativecommons.org/licenses/by/4.0/legalcode
+Human-readable summary: https://creativecommons.org/licenses/by/4.0/
+
+Suggested attribution:
+  "Quest 3 PCVR Wi-Fi streaming diagnostics" by Rikufdi, licensed CC BY 4.0.
+  Source: <repository URL>
