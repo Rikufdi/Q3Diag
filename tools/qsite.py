@@ -67,6 +67,7 @@ _SCRIPTS = {
     "quest_sampler": "Sample-Quest.ps1",
     "pc_sampler": "Sample-PC.ps1",
     "quest_probe": "Quest-Probe.ps1",
+    "game_fps_sampler": "Sample-GameFPS.ps1",
 }
 
 DEFAULTS = {
@@ -76,6 +77,12 @@ DEFAULTS = {
     "elev_task": "PCVR-Elev",
     "ovr_metrics_dir": "/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics",
     "powershell": "powershell",
+    # Optional: PC game frame-time capture (Sample-GameFPS.ps1). Not vendored, not auto-discovered --
+    # empty means "skip PC game-fps capture". See Sample-GameFPS.ps1 for what it does and why.
+    "presentmon_exe": "",
+    "presentmon_args": "",
+    # Optional: tools/dashboard.py listen port.
+    "dashboard_port": 8765,
 }
 
 

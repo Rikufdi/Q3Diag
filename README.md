@@ -66,9 +66,11 @@ test-content/      test patterns used to drive the encoder
 
 | file | role |
 |---|---|
-| `tools/cell.py` | the workhorse: `serial`, `layer`, `capture`, `monitor`, `watch`, `passive`, `results` |
+| `tools/cell.py` | the workhorse: `serial`, `layer`, `capture`, `monitor`, `watch`, `passive`, `results`, `fingerprint`, `linktest` |
 | `tools/Sample-Quest.ps1` | headset sampler: MAC counters, `/proc/net/*`, radio state, thermals |
 | `tools/Sample-PC.ps1` | PC sampler: NVENC/GPU utilisation, windows TCP retransmits, streamer RSS |
+| `tools/Sample-GameFPS.ps1` | optional PC-side game frame-time capture via PresentMon (not vendored) |
+| `tools/dashboard.py` | live local web dashboard for a running `monitor` session |
 | `tools/Quest-Probe.ps1` | read-only capability snapshot of a connected headset |
 | `tools/Run-Cell.ps1` | one-cell orchestration for the pcap matrix (phase 1) |
 | `tools/analyze.py` | pcap reduction via `tshark` |
@@ -92,8 +94,30 @@ a human can pick the rig up cold.
 - **NVIDIA GPU + `nvidia-smi`** for the PC-side encoder sampler.
 - **Virtual Desktop Streamer 1.34.22** and/or **Meta Link** — the streaming stacks under test.
 - **Meta Quest 3** with wireless debugging enabled (Settings → Developer).
+- *Optional* — **[PresentMon](https://github.com/GameTechDev/PresentMon/releases/latest)** (the
+  console-app build, e.g. `PresentMon-2.5.1-x64.exe`) for PC **game** frame-time capture during
+  `monitor` — download the `.exe`, save it anywhere (e.g. `tools/vendor/`, which is git-ignored), and
+  set `presentmon_exe` to that path in `tools/site.json`. Leave it unset to skip this sampler entirely;
+  everything else in the harness works without it. No install step beyond that — it's a standalone
+  console exe, not a service.
 
 ## Setup
+
+**On the headset, before any of this works:**
+
+1. Enable **Developer Mode** — requires a (free) Meta Horizon developer organization; toggled from the
+   Meta Horizon mobile app under Menu → Devices → \<your headset\> → Developer Mode. This is a one-time,
+   account-level step and has nothing to do with adb itself.
+2. In the headset, **Settings → System → Developer**, turn on **USB Connection Dialog** and
+   **Wireless Debugging**.
+3. **Connect the headset to the PC with a USB-C cable at least once.** Put the headset on — it will show
+   two separate permission dialogs the first time: **"Allow USB debugging?"** (check "always allow from
+   this computer" so this doesn't repeat) and **"Allow access to device data?"** (MTP/file access —
+   accept this too; some Windows USB driver stacks won't finish enumerating the ADB interface without
+   it). Both need to be accepted *in the headset*, so you have to be wearing it, or at least able to see
+   the panel, for this one-time step.
+
+Only after that is wireless adb possible at all — the actual connection setup is:
 
 ```powershell
 git clone <your-fork> ; cd Q3Diag
@@ -102,13 +126,28 @@ git clone <your-fork> ; cd Q3Diag
 Copy-Item tools/site.example.json tools/site.json
 notepad tools/site.json        # fill in quest_ip; leave tools you already have on PATH empty
 
-# 2. attach the headset
-adb pair <ip>:<port>           # once, from the headset's wireless-debugging dialog
+# 2. attach the headset (after the one-time USB step above)
+adb pair <ip>:<port>           # once, from the headset's Settings -> Developer -> Wireless Debugging dialog
 python tools/cell.py serial    # resolves the endpoint (5555, then mDNS)
 
 # 3. sanity check: read-only capability snapshot
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/Quest-Probe.ps1
 ```
+
+### Troubleshooting: "no Quest reachable" / adb sees nothing
+
+Wireless debugging is flaky by design — it drops on every headset reboot and on some Wi-Fi Debugging
+toggles (see `findings.md`), so this happens routinely, not just at first setup:
+
+1. Plug the headset in over USB-C. Put it on and accept the debugging dialog if it reappears.
+2. `adb devices` should now show the headset as `device` (over USB). If it shows **nothing at all**
+   despite Windows clearly seeing the headset (Device Manager → the headset appears as a composite USB
+   device with an "ADB Interface"), the adb **server** is the usual culprit, not the cable: a stale
+   `adb.exe` server process from an earlier session can sit there indefinitely without rescanning USB.
+   Fix: `adb kill-server` then `adb devices` (which auto-starts a fresh server and rescans).
+3. Once the headset shows up over USB: `adb tcpip 5555` re-arms wireless debugging for this boot, then
+   unplug the cable. `python tools/cell.py serial` (or any harness command) will find it over Wi-Fi from
+   here via `:5555` first, then mDNS.
 
 `tools/site.json` is git-ignored — every machine-specific value lives there, and every harness
 script resolves through it (`qsite.path("tshark")` in Python, `Resolve-SiteTool $Site 'tshark'` in
@@ -127,6 +166,43 @@ python tools/cell.py results <run_id>           # reduce -> results.json + a row
 python tools/cell.py passive <run_id> start     # before play
 python tools/cell.py passive <run_id> end       # after play
 ```
+
+### Live dashboard, fingerprinting, and link testing
+
+```bash
+# watch a live monitor session in a browser (poll the same TSVs monitor is writing)
+python tools/dashboard.py <run_id>              # -> http://127.0.0.1:8765/
+
+# after `results`, compare this run against the saved baseline for its configuration
+# (same stack/codec/bitrate/band) and report which metrics drifted
+python tools/cell.py fingerprint <run_id>                    # diff vs. saved baseline
+python tools/cell.py fingerprint <run_id> --save-baseline    # (re-)establish the baseline instead
+
+# live RSSI/retry watch for physically testing AP/headset placement or cable routing -- no
+# monitor/stream needed. Plays a soft descending chime when the link degrades past threshold, and an
+# ascending one on recovery, so you can move hardware around without staring at the terminal.
+python tools/cell.py linktest                   # add --no-beep to silence it
+
+# `watch` (used during `monitor`) can beep too, for testing placement during a real stream:
+python tools/cell.py watch <run_id> 10 --beep
+```
+
+The PC chime plays through the standard Windows audio (multimedia) path, so it should reach whatever
+your default playback device is, however unusual the setup. Both commands also accept
+`--headset-beep`, but be aware of what it actually does: this Horizon OS build's `cmd notification post`
+has no way to attach sound/vibration to a shell-posted notification, so it only leaves a silent,
+timestamped entry in the headset's notification history — useful for correlating a degradation event
+after the fact, not as a live alert. See `findings.md` for how that was confirmed.
+
+`fingerprint`'s baselines live in `baseline/fingerprints/<tag>.json` (git-ignored: they're this rig's
+own "current normal", not a portable result) and the per-run diff is written to
+`runs/<run_id>/fingerprint_diff.json`; `dashboard.py` surfaces any flagged drift as a banner if that
+file exists for the run it's watching.
+
+PC-side game frame rate (as opposed to the headset compositor's rate, which is all the other samplers
+see) is optional: set `presentmon_exe` in `tools/site.json` to a downloaded
+[PresentMon](https://github.com/GameTechDev/PresentMon) build and `monitor` captures it automatically;
+`results` reduces it into `pc_game_fps_mean` / `pc_game_fps_1pct_low` / etc.
 
 Per-run outputs are listed in `report.md` and in the playbook. Two operational rules that were
 learned the hard way:

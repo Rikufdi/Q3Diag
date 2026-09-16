@@ -5,6 +5,20 @@ Companion tool: `tools/Quest-Probe.ps1` (read-only battery, writes a snapshot di
 
 ## 1. Connect
 
+**Prerequisite, done once on the headset itself (not adb-able — a human has to do this wearing the
+headset):** Developer Mode enabled via the Meta Horizon mobile app, `Settings -> System -> Developer ->
+USB Connection Dialog` + `Wireless Debugging` turned on, and one USB-C cable connection where the
+headset shows two prompts to accept — "Allow USB debugging?" and "Allow access to device data?" (MTP).
+Skipping the second one is a common reason Windows never finishes enumerating the ADB interface. See
+README "Setup" for the full first-time walkthrough.
+
+Wireless debugging then drops routinely (every headset reboot, some toggles) — that is normal, not a
+setup failure, see `findings.md`. If `adb devices`/`cell.py serial` finds nothing at all despite Windows
+clearly seeing the headset in Device Manager, suspect a **stale adb server** before anything else:
+`adb kill-server` then re-run `adb devices` (auto-restarts and rescans) — this alone fixed an otherwise
+identical-looking dead-connection on 2026-09-16. Only if that doesn't surface it does it need the full
+USB recovery (`adb tcpip 5555` over cable, then unplug).
+
 Every machine-specific path/IP lives in `tools/site.json` (git-ignored; copy
 `tools/site.example.json` and fill it in). The scripts resolve it themselves, e.g.:
 
@@ -214,6 +228,81 @@ Rules that mattered in practice:
 - `hub stop` hard-kills: a monitor's `finally` may not run, so the clock/cell window is written at start.
 - Two processes emit `VrApi` lines (the streaming session pid and `vrshell`) — the reducer locks onto the
   session pid and reports the other's line count separately.
+- **The headset can drop off Wi-Fi entirely mid-monitor, not just power-save.** Verified 2026-09-16: left
+  idle without being worn, it goes into a full standby that kills the streaming app and drops the radio
+  (confirmed via 100% ICMP loss to the headset's IP, not just an adb symptom) for several minutes, then
+  self-recovers. `session.json` handles this correctly now — `write_session()` tracks a **list of
+  segments**, re-arming session detection every time the app disappears and reappears (it used to latch
+  closed permanently after the first end and silently miss any session after a sleep/wake). Top-level
+  `start_dev_s`/`end_dev_s`/`proc` stay backward compatible (first segment's start, last segment's end);
+  `segments` and `active_min` (total playing time, excluding the gap) are additive.
+  `results()`/`quest_session_min` prefers `active_min` when `segments` is present, falls back to the old
+  single-span formula for pre-fix `session.json` files. Restarting `monitor` on the same `run_id` also
+  resumes segments already on disk instead of discarding them (needed this same day, to pick up the fix
+  mid-session, without losing the already-completed first segment).
+  **Known gap, not yet fixed**: `decay_events()` doesn't know about these segment boundaries, so a real
+  multi-minute sleep-related outage inside the window gets counted as an ordinary "decay episode"
+  indistinguishable from a benign low-motion moment (see `findings.md`, 2026-09-16 entry, for a worked
+  example telling the two apart by hand from `enc_util`/`tcp_retrans` in `decay_episodes.tsv`).
+
+## 7a. Live dashboard, fingerprinting, and link testing (2026-09-16)
+
+Three additions on top of `monitor`/`watch`/`results`, aimed at *in-the-moment* diagnosis rather than
+post-hoc reduction:
+
+- **`python tools/dashboard.py <run_id>`** — a local web dashboard (stdlib `http.server`, no
+  dependencies, no external JS/CDN) that re-reads the same TSVs `monitor` is appending to and serves a
+  self-refreshing page at `http://127.0.0.1:8765/`: RSSI, link speed, retry/lost %, delivered Mbps
+  (sparkline), NVENC/GPU util, ping, temps, controller (p2p0) error counts, and headset mount state.
+  Has no state of its own — start/stop it freely without touching the monitor (but it does hold the old
+  page in memory, so restart it after editing `dashboard.py` itself). If
+  `runs/<run_id>/fingerprint_diff.json` exists, flagged metrics show as a red banner. Every tile carries
+  a plain-language one-line explanation and auto-sizes/shrinks its font for long values (2026-09-16 UI
+  pass — the first version had labels like "HS TCP RETRANS (CUM)" and clipped values like
+  "HEADSET_MOUNTI..."; don't regress to bare field-name labels or fixed-height tiles). Retry/loss % are
+  a **10-second trailing average** (`RETRY_WINDOW_S` in `dashboard.py`), not an instantaneous reading —
+  a raw two-sample (~2s) delta was too few packets for a stable ratio and was visibly jumpy; `linktest`
+  has the same fix (`retry_window_s`, default 10s). 10s was chosen over 30s deliberately: both tools
+  double as live AP/headset-placement testers, and a 30s window would make a change you just caused by
+  moving hardware take up to 30s to show up, which fights that use case.
+- **`python tools/cell.py fingerprint <run_id> [--save-baseline] [--tag=NAME]`** — diffs a run's
+  `results.json` against a saved per-configuration baseline (tag defaults to
+  `<stack>_<codec>_<bitrate>_<band>`) across ~19 curated metrics (retry/lost %, ping percentiles, fps,
+  stale-per-minute, NVENC util, decay episodes, thermals, TX power, TCP retransmits, PC game fps).
+  Each metric has a drift rule (ratio threshold OR absolute threshold, whichever trips first — see
+  `FINGERPRINT_RULES` in `cell.py`). With no existing baseline for the tag, the run becomes the
+  baseline instead of being diffed. Point: run this after every session so a regression (AP moved,
+  driver update, cable re-routed, a config toggle) shows up as "these N metrics moved, here's by how
+  much" instead of a vague "feels different today". Baselines live in `baseline/fingerprints/` and are
+  git-ignored — they are this rig's own current-normal snapshot, not a portable result.
+- **`python tools/cell.py linktest [--no-beep]`** — standalone live RSSI/retry watcher, no
+  monitor/streaming session required (~1 Hz `cmd wifi status` polls only). Prints a compact status line
+  and, by default, plays a short descending two-tone chime the moment RSSI drops materially below its
+  own rolling baseline or the MAC retry rate crosses a threshold, and an ascending chime on recovery.
+  Built for physically walking the headset or AP around, or wiggling cables, while listening for the
+  boop instead of reading numbers — the direct answer to "is this placement/cable actually the
+  problem". `watch <run_id> [interval] --beep` does the same during an actual `monitor` session.
+  Verified 2026-09-16 to play through the normal Windows audio path (`winsound.PlaySound`/`SND_MEMORY`),
+  not the legacy `winsound.Beep()` tone generator, which was silent on this rig's audio setup.
+- **`--headset-beep`** on either command additionally calls `_alert_headset` — do not describe this as
+  an on-headset alert. It is a verified dead end (2026-09-16, see `findings.md`): this Horizon OS
+  build's `cmd notification post` has no sound/vibration/priority flag at all, so the posted
+  notification (`sound=null vibrate=null`) lands silently in the headset's notification history with no
+  heads-up card. Confirmed with the headset worn and Do Not Disturb off. Keep it opt-in and only useful
+  as a retroactive timestamp marker, never claim it alerts the wearer.
+
+## 7b. Optional PC game frame-time capture (PresentMon)
+
+Every other frame-rate sampler here (OVR CSV, VrApi logcat) measures the **headset compositor's** rate;
+none of them can see the **PC game's own** present rate — an explicit gap noted in `findings.md`. If
+`presentmon_exe` is set in `tools/site.json` (get a build from
+[PresentMon](https://github.com/GameTechDev/PresentMon); not vendored, like iperf3), `monitor` launches
+`tools/Sample-GameFPS.ps1` alongside the other samplers, capturing every presenting process system-wide
+(no game-specific process name needed up front). `results()`' `presentmon_reduce()` then picks the
+dominant non-streamer/non-OS process in the window as "the game" and reports
+`pc_game_fps_mean`/`pc_game_fps_min`/`pc_game_fps_1pct_low`. PresentMon's CLI/CSV schema varies by
+version; the reducer reads whichever known column-name variant is present and the sampler script
+documents how to override the launch args via `presentmon_args` if a build's flags differ.
 
 ## 7. Latency/jitter measurement recipes (the project's open gap)
 

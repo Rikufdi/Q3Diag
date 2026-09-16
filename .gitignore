@@ -36,6 +36,18 @@ topology/ap-radio.png
 # Third-party aarch64 Android build of iperf3 (BSD-3-Clause). Fetch or build your own.
 tools/iperf3.*
 
+# Third-party PresentMon console-app build (MIT). Fetch your own from
+# https://github.com/GameTechDev/PresentMon/releases/latest and point presentmon_exe at it.
+tools/vendor/
+
+# Raw PresentMon per-frame capture (regenerable by re-running a monitored session with
+# presentmon_exe configured); the reduced pc_game_fps_* fields land in results.json/results.csv instead.
+runs/**/presentmon.csv
+
+# Fingerprint baselines are this rig's own "current normal" per configuration (AP, driver, OS build),
+# not a portable measurement -- regenerate with `cell.py fingerprint <run_id> --save-baseline`.
+baseline/fingerprints/
+
 # Python
 __pycache__/
 *.py[cod]

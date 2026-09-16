@@ -5,6 +5,15 @@ Usage:
   python cell.py serial                          # print the resolved wireless-adb endpoint
   python cell.py capture <run_id> [duration_s]   # pktmon + device sampler + ping + VrApi logcat
   python cell.py results <run_id> [overlay.json] # analyze + deltas + ovr + write results
+  python cell.py fingerprint <run_id> [--save-baseline] [--tag=NAME]
+                                                  # diff results.json against a saved per-config baseline
+  python cell.py linktest [--no-beep] [--headset-beep]
+                                                  # live RSSI/retry watch for AP/headset placement testing,
+                                                  # no monitor/stream needed; PC beeps by default (confirmed
+                                                  # working). --headset-beep is a silent notification-history
+                                                  # marker only, NOT an alert -- see _alert_headset
+  python cell.py watch <run_id> [interval] [--beep] [--headset-beep]
+                                                  # add during `monitor` for the same alerting
 
 overlay.json keys (optional): fps, lat_total, lat_game, lat_encode, lat_network, lat_decode,
                               bitrate_mbps, wifi_mbps
@@ -68,10 +77,278 @@ MEAS_COLS = [
     "codec_events_total", "codec_events_session", "codec_starts_session", "codec_restarts_session",
     "passive_avg_down_mbps", "passive_avg_up_mbps",
     "quest_clock_offset_s", "quest_uptime_s", "quest_cell_start_dev_s",
-    "quest_session_start_dev_s", "quest_session_min",
+    "quest_session_start_dev_s", "quest_session_min", "quest_session_segments",
+    "pc_game_process", "pc_game_frame_count", "pc_game_fps_mean", "pc_game_fps_min", "pc_game_fps_1pct_low",
 ]
 
+# ---------------------------------------------------------------- fingerprinting
+# A "fingerprint" is a small, curated subset of results.json meant to answer "did anything change since
+# last time", not to replace the full results row. Each metric has a drift rule: (direction, ratio_thresh,
+# abs_thresh). A metric trips if it moves past EITHER threshold -- ratio catches proportionally large
+# moves even on a small baseline value, abs catches small-ratio moves that still matter in absolute terms
+# (e.g. +4 degC). ratio_thresh=999 disables the ratio check for counters that scale with session length.
+FINGERPRINT_KEYS = [
+    "retry_rate_pct", "lost_rate_pct", "ping_rtt_p50_ms", "ping_rtt_p95_ms", "ping_loss_pct",
+    "vr_api_fps_mean", "vr_api_seconds_below_85fps", "vr_api_stale_per_min",
+    "pc_enc_util_mean", "pc_tcp_retrans_mean", "decay_episodes", "decay_total_min",
+    "decay_rate_median_mbps", "env_soc_max_c", "env_gpu_max_c", "env_sta_tx_power_dbm",
+    "wlan0_rx_errs", "wlan0_rx_drop", "tcp_retrans_segs", "pc_game_fps_mean", "pc_game_fps_1pct_low",
+]
+FINGERPRINT_RULES = {
+    "retry_rate_pct":             ("worse_high", 1.5,   0.5),
+    "lost_rate_pct":               ("worse_high", 2.0,   0.05),
+    "ping_rtt_p50_ms":             ("worse_high", 1.5,   3.0),
+    "ping_rtt_p95_ms":             ("worse_high", 1.5,   8.0),
+    "ping_loss_pct":                ("worse_high", 2.0,   0.5),
+    "vr_api_fps_mean":              ("worse_low",  0.9,   2.0),
+    "vr_api_seconds_below_85fps":  ("worse_high", 2.0,   10.0),
+    "vr_api_stale_per_min":        ("worse_high", 2.0,   3.0),
+    "pc_enc_util_mean":             ("worse_low",  0.7,   3.0),
+    "pc_tcp_retrans_mean":          ("worse_high", 3.0,   2.0),
+    "decay_episodes":               ("worse_high", 999.0, 0.5),
+    "decay_total_min":              ("worse_high", 1.5,   1.0),
+    "decay_rate_median_mbps":       ("worse_low",  0.85,  20.0),
+    "env_soc_max_c":                ("worse_high", 1.05,  4.0),
+    "env_gpu_max_c":                ("worse_high", 1.05,  4.0),
+    "env_sta_tx_power_dbm":         ("worse_high", 1.3,   3.0),
+    "wlan0_rx_errs":                ("worse_high", 999.0, 5.0),
+    "wlan0_rx_drop":                ("worse_high", 999.0, 5.0),
+    "tcp_retrans_segs":             ("worse_high", 999.0, 20.0),
+    "pc_game_fps_mean":             ("worse_low",  0.9,   3.0),
+    "pc_game_fps_1pct_low":         ("worse_low",  0.8,   5.0),
+}
+
+
+def _fp_derive(res):
+    out = {k: res.get(k) for k in FINGERPRINT_KEYS if res.get(k) is not None}
+    lines, stale = res.get("vr_api_lines"), res.get("vr_api_stale_total")
+    if lines and stale is not None:
+        out["vr_api_stale_per_min"] = round(stale / (lines / 60), 2)
+    return out
+
+
+def fingerprint(run_id, save_baseline=False, tag=None):
+    """Compare a run's results.json against a saved per-configuration baseline (same stack/codec/bitrate/
+    band by default) and report which metrics drifted beyond their threshold. With no prior baseline for
+    the tag, or with save_baseline=True, this run becomes the new baseline instead of being diffed.
+    Point of this: run it after every session so a regression (AP moved, driver update, cable routing)
+    shows up as 'these N metrics moved' instead of a vague 'something feels off'."""
+    run_dir = os.path.join(BASE, "runs", run_id)
+    res_path = os.path.join(run_dir, "results.json")
+    if not os.path.exists(res_path):
+        raise RuntimeError(f"no results.json in {run_dir} -- run `cell.py results {run_id}` first")
+    res = json.load(open(res_path))
+    settings = json.load(open(os.path.join(run_dir, "settings.json"))) if \
+        os.path.exists(os.path.join(run_dir, "settings.json")) else {}
+    tag = tag or f"{settings.get('stack', 'na')}_{settings.get('codec', 'na')}_{settings.get('bitrate_mbps', 'na')}_{settings.get('band', 'na')}"
+    tag = re.sub(r"[^A-Za-z0-9_.+-]", "_", str(tag))
+    metrics = _fp_derive(res)
+
+    fp_dir = os.path.join(BASE, "baseline", "fingerprints")
+    os.makedirs(fp_dir, exist_ok=True)
+    baseline_path = os.path.join(fp_dir, f"{tag}.json")
+    diff_path = os.path.join(run_dir, "fingerprint_diff.json")
+    fp = {"tag": tag, "run_id": run_id, "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+          "settings": {k: settings.get(k) for k in ("stack", "codec", "bitrate_mbps", "content", "band")},
+          "metrics": metrics}
+
+    if save_baseline or not os.path.exists(baseline_path):
+        json.dump(fp, open(baseline_path, "w"), indent=1)
+        why = "forced" if save_baseline else "no prior baseline for this configuration"
+        print(f"fingerprint: saved '{tag}' from {run_id} as the baseline ({why})")
+        json.dump({"tag": tag, "baseline": True, "flags": []}, open(diff_path, "w"), indent=1)
+        return {"baseline": True, "tag": tag, "flags": []}
+
+    base = json.load(open(baseline_path))
+    base_metrics = base.get("metrics", {})
+    flags, rows = [], []
+    for key, val in metrics.items():
+        rule = FINGERPRINT_RULES.get(key)
+        bval = base_metrics.get(key)
+        if rule is None or bval is None:
+            continue
+        direction, ratio_thresh, abs_thresh = rule
+        delta = val - bval
+        if direction == "worse_high":
+            trip = (delta >= abs_thresh) or (bval > 0 and val / bval >= ratio_thresh)
+        else:
+            trip = ((-delta) >= abs_thresh) or (bval > 0 and val / bval <= ratio_thresh)
+        row = {"metric": key, "baseline": bval, "current": val, "delta": round(delta, 3)}
+        rows.append(row)
+        if trip:
+            flags.append(row)
+
+    print(f"fingerprint: {run_id} vs baseline '{tag}' (from {base.get('run_id')} @ {base.get('saved_at')})")
+    if flags:
+        print(f"  {len(flags)} metric(s) drifted beyond threshold:")
+        for r in flags:
+            print(f"    - {r['metric']}: {r['baseline']} -> {r['current']} (delta {r['delta']:+})")
+    else:
+        print("  no metric exceeded its drift threshold -- consistent with the baseline")
+    out = {"tag": tag, "baseline": False, "baseline_run_id": base.get("run_id"),
+           "baseline_saved_at": base.get("saved_at"), "flags": flags, "all": rows}
+    json.dump(out, open(diff_path, "w"), indent=1)
+    print(f"  wrote {diff_path}")
+    return out
+
+
+# ---------------------------------------------------------------- audio alerting
+def _tone_wav(tones, sample_rate=44100, volume=0.5):
+    """Build an in-memory 16-bit mono PCM WAV of the given [(freq_hz, ms), ...] tones played back to
+    back, each with a short fade in/out to avoid clicks. Used instead of winsound.Beep(), which drives
+    Windows' legacy tone-generator API -- historically the physical PC speaker, and on modern systems
+    only loosely routed through the audio mixer. That API goes silent on non-standard audio setups
+    (virtual audio devices, multi-endpoint routing, ASIO/spatial-audio processing chains, etc.) because
+    it doesn't share a path with normal application audio. A real WAV played via winsound.PlaySound uses
+    the standard multimedia (waveOut) path instead -- the same one system/notification sounds use, so if
+    the machine can hear anything at all, it should hear this."""
+    import struct, math
+    pcm = bytearray()
+    for freq, ms in tones:
+        n = max(1, int(sample_rate * ms / 1000))
+        fade = max(1, int(sample_rate * 0.01))
+        for i in range(n):
+            env = min(1.0, i / fade, (n - i) / fade)
+            val = int(32767 * volume * env * math.sin(2 * math.pi * freq * i / sample_rate))
+            pcm += struct.pack("<h", val)
+    data = bytes(pcm)
+    fmt = struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, sample_rate * 2, 2, 16)
+    return b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " + fmt + b"data" + struct.pack("<I", len(data)) + data
+
+
+def _alert(degrade):
+    """A short two-tone chime -- descending for 'link got worse', ascending for 'link recovered'. Meant to
+    be run alongside `watch --beep` or `linktest` while physically moving the headset/AP/cables, so a
+    degradation is audible without staring at the terminal. Plays via winsound.PlaySound(SND_MEMORY) (see
+    _tone_wav for why, not winsound.Beep); falls back to MessageBeep, then the terminal bell, if that
+    fails or winsound is unavailable (non-Windows)."""
+    tones = [(520, 160), (360, 220)] if degrade else [(700, 110), (980, 140)]
+    try:
+        import winsound
+        winsound.PlaySound(_tone_wav(tones), winsound.SND_MEMORY)
+        return
+    except Exception:
+        pass
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION if degrade else winsound.MB_ICONASTERISK)
+        return
+    except Exception:
+        pass
+    print("\a", end="", flush=True)
+
+
+def _alert_headset(ser, degrade):
+    """Posts a notification on the headset via `cmd notification post` -- NOT an audible or visible
+    alert, verified dead end as of 2026-09-16 (see findings.md "Dead end: cmd notification post..."):
+    this Horizon OS build's shell notification tool has no flag for sound/vibration/priority at all
+    (`-h` lists only -t/-i/-I/-S/-c), and the posted notification carries `sound=null vibrate=null` --
+    confirmed with the headset worn and Do Not Disturb off: it lands in notification history only, no
+    heads-up card, no sound. Kept only as a silent timestamped marker for retroactively correlating a
+    degradation event with the headset's own notification log, NOT as a live alert -- do not present
+    --headset-beep to a user as making noise or popping up a card, it does neither on this build.
+    Still gated behind explicit opt-in and never fired without asking first: it is still an on-device
+    mutation (creates a real, visible-in-history notification), same category QUEST-AGENT-PLAYBOOK.md
+    gates behind asking, even though its effect turned out to be inert in the moment."""
+    title = "Q3Diag link degraded" if degrade else "Q3Diag link recovered"
+    body = "RSSI/retry threshold crossed" if degrade else "back to baseline"
+    cmd = f"cmd notification post -S bigtext -t '{title}' q3diag-linktest '{body}'"
+    _adb("-s", ser, "shell", cmd)
+
+
+def _parse_wifi_status(text):
+    out = {}
+    for key, pat in (("tx_success", r"successfulTxPackets:\s*(\d+)"), ("tx_retries", r"retriedTxPackets:\s*(\d+)"),
+                     ("tx_lost", r"lostTxPackets:\s*(\d+)"), ("rx_success", r"successfulRxPackets:\s*(\d+)"),
+                     ("rssi", r"RSSI:\s*(-?\d+)"), ("tx_link_mbps", r"Tx Link speed:\s*(\d+)Mbps")):
+        m = re.search(pat, text)
+        out[key] = int(m.group(1)) if m else None
+    return out
+
+
+def linktest(interval=1.0, rssi_drop_db=8, retry_pct_thresh=5.0, beep=True, headset_beep=False, window=5,
+             retry_window_s=10):
+    """Standalone live link-quality watch -- no monitor/streaming session needed. Polls `cmd wifi status`
+    at `interval`s, prints RSSI/link/retry/lost, and (if beep) sounds an alert when RSSI drops
+    rssi_drop_db below its rolling baseline or the retry rate exceeds retry_pct_thresh. Built for
+    physically testing AP placement, headset position, or cable routing in real time: move things around
+    and listen for the boop instead of reading numbers.
+    retry/lost % are deltas over the trailing retry_window_s seconds of polls, not just the previous
+    poll -- a single-poll delta is too few packets for a stable ratio at interval=1s and was visibly
+    jumpy (and could false-trigger the alarm on noise); 10s balances that against staying responsive to
+    a real change caused by moving hardware around, same tradeoff as the dashboard's retry tile.
+    headset_beep additionally posts a marker to the headset's notification history (see _alert_headset)
+    -- NOT an audible/visible alert, a verified dead end on this Horizon OS build (silent, no heads-up
+    card). Only useful for retroactively correlating a degradation event against the headset's own
+    notification log timestamps. Off by default; still an on-device mutation."""
+    ser = adb_serial()
+    print(f"linktest: interval={interval}s rssi_drop_db={rssi_drop_db} retry_pct_thresh={retry_pct_thresh}% "
+          f"(avg over {retry_window_s}s) beep={beep} headset_beep={headset_beep}")
+    print("move the headset / AP / cables now -- Ctrl+C to stop")
+    hist, baseline_rssi, alarm = [], None, False
+    counters = []  # [(poll_time, wifi_status_dict), ...] trimmed to the trailing retry_window_s
+    try:
+        while True:
+            t_now = time.time()
+            c = _parse_wifi_status(_adb("-s", ser, "shell", "cmd wifi status"))
+            rssi = c.get("rssi")
+            if rssi is not None:
+                hist.append(rssi)
+                hist = hist[-window:]
+                if baseline_rssi is None and len(hist) >= window:
+                    baseline_rssi = sum(hist) / len(hist)
+            counters.append((t_now, c))
+            counters = [x for x in counters if t_now - x[0] <= retry_window_s]
+            retry_pct = lost_pct = None
+            if len(counters) >= 2:
+                a, b = counters[0][1], counters[-1][1]
+                dtx = (b.get("tx_success") or 0) - (a.get("tx_success") or 0)
+                dtr = (b.get("tx_retries") or 0) - (a.get("tx_retries") or 0)
+                dtl = (b.get("tx_lost") or 0) - (a.get("tx_lost") or 0)
+                if dtx > 0:
+                    retry_pct, lost_pct = round(dtr / dtx * 100, 2), round(dtl / dtx * 100, 3)
+            bad, reasons = False, []
+            if baseline_rssi is not None and rssi is not None and (baseline_rssi - rssi) >= rssi_drop_db:
+                bad, _ = True, reasons.append(f"RSSI {rssi} vs baseline {baseline_rssi:.0f}")
+            if retry_pct is not None and retry_pct >= retry_pct_thresh:
+                bad, _ = True, reasons.append(f"retry {retry_pct}%")
+            print(f"[{time.strftime('%H:%M:%S')}] rssi={rssi if rssi is not None else '-'} "
+                  f"link={c.get('tx_link_mbps', '-')}Mbps "
+                  f"retry={retry_pct if retry_pct is not None else '-'}% "
+                  f"lost={lost_pct if lost_pct is not None else '-'}%"
+                  + (f"  *** DEGRADED: {'; '.join(reasons)}" if bad else ""), flush=True)
+            if bad and not alarm:
+                alarm = True
+                if beep:
+                    _alert(degrade=True)
+                if headset_beep:
+                    _alert_headset(ser, degrade=True)
+            elif not bad and alarm:
+                alarm = False
+                if beep:
+                    _alert(degrade=False)
+                if headset_beep:
+                    _alert_headset(ser, degrade=False)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("linktest stopped")
+
 _serial_cache = None
+
+
+def write_session(path, stack, segments):
+    """Write session.json from the full list of {proc, start_dev_s, [end_dev_s]} segments observed so
+    far in this monitor run. Stays backward compatible with the old single-session shape at the top
+    level (start_dev_s = first segment's start, end_dev_s = last segment's end if it has closed, proc =
+    most recent) so `results()` and any old tooling reading session.json need no changes; `segments` and
+    `active_min` (sum of each segment's duration, i.e. excluding any gap where the app wasn't running --
+    such as while the headset was asleep) are additive fields for anything that wants the full picture."""
+    active_min = round(sum((s.get("end_dev_s", time.time()) - s["start_dev_s"]) for s in segments) / 60, 2)
+    doc = {"stack": stack, "proc": segments[-1]["proc"], "start_dev_s": segments[0]["start_dev_s"],
+           "segments": segments, "active_min": active_min}
+    if "end_dev_s" in segments[-1]:
+        doc["end_dev_s"] = segments[-1]["end_dev_s"]
+    json.dump(doc, open(path, "w"), indent=1)
 
 
 def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
@@ -100,7 +377,8 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
               "env": "quest_env_samples.tsv", "sf": "sf_latency_samples.tsv",
               "layers": "sf_layers.log", "logcat": "vr_api_logcat.txt",
               "cm": "cm_wifi_snapshots.txt", "pc": "pc_samples.tsv",
-              "ping": "ping_samples.txt", "session": "session.json"}.items()}
+              "ping": "ping_samples.txt", "session": "session.json",
+              "presentmon": "presentmon.csv"}.items()}
 
     sampler = subprocess.Popen(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SAMPLER,
@@ -116,8 +394,48 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
     ping = subprocess.Popen(["ping", "-n", str(max_seconds), "-w", "1000", QUEST_IP],
                             stdout=open(files["ping"], "a"), stderr=subprocess.DEVNULL)
 
+    presentmon = None
+    presentmon_exe = qsite.get("presentmon_exe")
+    if presentmon_exe and os.path.exists(presentmon_exe):
+        presentmon = subprocess.Popen(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", qsite.script("game_fps_sampler"),
+             "-PresentMonExe", presentmon_exe, "-OutFile", files["presentmon"],
+             "-Seconds", str(max_seconds + 60), "-ExtraArgs", qsite.get("presentmon_args", "")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"PresentMon game-fps capture started -> {files['presentmon']}")
+    else:
+        print("PresentMon not configured (site.json 'presentmon_exe') -- skipping PC game-fps capture")
+
     start_dev = time.time() + off
-    sf_layer, sf_prev, sf_next, sf_found_at, session = None, 0, 0.0, 0.0, {}
+    sf_layer, sf_prev, sf_next, sf_found_at = None, 0, 0.0, 0.0
+    # segments: every VD/Air Link app start..stop the process-presence check observes during this monitor
+    # run. The headset can drop into standby (Wi-Fi off, streaming app killed by the OS) without anyone
+    # touching it -- observed 2026-09-16 -- and wake up later with the app relaunched; without tracking
+    # multiple segments the old single-`session` dict latched permanently "closed" after the first end and
+    # never re-armed, so a second play window in the same monitor run went undetected. `current` is the
+    # in-progress segment (None between sessions); `segments` is the full history for this run. Seeded
+    # from any session.json already on disk so restarting `monitor` on the same run_id (e.g. to pick up
+    # a code change, or after a hard-kill/crash) doesn't silently discard already-completed segments --
+    # only the in-memory list would otherwise reset, even though the sample TSVs themselves just keep
+    # appending regardless of a monitor restart.
+    current, segments = None, []
+    if os.path.exists(files["session"]):
+        try:
+            prev = json.load(open(files["session"]))
+            loaded = prev.get("segments")
+            if loaded is None and prev.get("start_dev_s"):
+                loaded = [{"proc": prev.get("proc"), "start_dev_s": prev["start_dev_s"],
+                          **({"end_dev_s": prev["end_dev_s"]} if "end_dev_s" in prev else {})}]
+            if loaded:
+                if "end_dev_s" not in loaded[-1]:
+                    # was still open when this file was last written; the writing process is gone now
+                    # (we're starting fresh), so close it at the file's own mtime as the best available
+                    # estimate of when that monitor process stopped updating it.
+                    loaded[-1]["end_dev_s"] = os.path.getmtime(files["session"])
+                segments = loaded
+                print(f"resumed {len(segments)} prior session segment(s) from {files['session']}")
+        except (OSError, ValueError, KeyError):
+            pass
     samples = {"wifi_prev": None, "ping_replies": 0, "ping_timeouts": 0, "sf_frames": 0.0}
     last_status = 0.0
     try:
@@ -148,14 +466,18 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
                 last_status = now
                 procs = _adb("-s", ser, "shell",
                              "ps -A -o NAME | grep -E 'VirtualDesktop|xrstreamingclient' | tr '\\n' ' '").strip()
-                if procs and not session:
-                    session = {"stack": stack, "proc": procs, "start_dev_s": round(time.time() + off, 3)}
-                    json.dump(session, open(files["session"], "w"), indent=1)
-                    print(f"[{time.strftime('%H:%M:%S')}] SESSION DETECTED: {procs}")
-                elif session and not procs and "end_dev_s" not in session:
-                    session["end_dev_s"] = round(time.time() + off, 3)
-                    json.dump(session, open(files["session"], "w"), indent=1)
-                    print(f"[{time.strftime('%H:%M:%S')}] SESSION ENDED ({(session['end_dev_s']-session['start_dev_s'])/60:.1f} min)")
+                if procs and current is None:
+                    current = {"proc": procs, "start_dev_s": round(time.time() + off, 3)}
+                    segments.append(current)
+                    write_session(files["session"], stack, segments)
+                    print(f"[{time.strftime('%H:%M:%S')}] SESSION DETECTED (#{len(segments)}): {procs}")
+                elif current is not None and not procs:
+                    current["end_dev_s"] = round(time.time() + off, 3)
+                    write_session(files["session"], stack, segments)
+                    print(f"[{time.strftime('%H:%M:%S')}] SESSION ENDED (#{len(segments)}, "
+                          f"{(current['end_dev_s'] - current['start_dev_s']) / 60:.1f} min) "
+                          f"-- will re-arm if the app restarts (e.g. after headset sleep/wake)")
+                    current = None
                 wifi = tail_row(files["wifi"], 10)
                 net = tail_row(files["net"], 30)
                 vrapi = vrapi_tail(files["logcat"])
@@ -170,7 +492,9 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
     except KeyboardInterrupt:
         print("monitor interrupted")
     finally:
-        for p in (logcat, ping, sampler, pc):
+        for p in (logcat, ping, sampler, pc, presentmon):
+            if p is None:
+                continue
             p.terminate()
             try:
                 p.wait(timeout=10)
@@ -178,9 +502,10 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
                 p.kill()
         clock["cell_start_dev_s"] = round(start_dev, 3)
         clock["cell_end_dev_s"] = round(time.time() + off, 3)
-        if session and "end_dev_s" not in session:
-            session["end_dev_s"] = clock["cell_end_dev_s"]
-            json.dump(session, open(files["session"], "w"), indent=1)
+        if current is not None and "end_dev_s" not in current:
+            current["end_dev_s"] = clock["cell_end_dev_s"]
+        if segments:
+            write_session(files["session"], stack, segments)
         json.dump(clock, open(os.path.join(run_dir, "clock.json"), "w"), indent=1)
         print("monitor stopped; artifacts in " + run_dir, flush=True)
 
@@ -408,12 +733,7 @@ def quest_counters(ser):
     wifi = _adb("-s", ser, "shell", "cmd wifi status")
     dev = _adb("-s", ser, "shell", "cat /proc/net/dev")
     snmp = _adb("-s", ser, "shell", "cat /proc/net/snmp")
-    out = {}
-    for key, pat in (("tx_success", r"successfulTxPackets:\s*(\d+)"), ("tx_retries", r"retriedTxPackets:\s*(\d+)"),
-                     ("tx_lost", r"lostTxPackets:\s*(\d+)"), ("rx_success", r"successfulRxPackets:\s*(\d+)"),
-                     ("rssi", r"RSSI:\s*(-?\d+)"), ("tx_link_mbps", r"Tx Link speed:\s*(\d+)Mbps")):
-        m = re.search(pat, wifi)
-        out[key] = int(m.group(1)) if m else None
+    out = _parse_wifi_status(wifi)
     m = re.search(r"(?m)^\s*wlan0:\s*(\d+)(?:\s+\d+){7}\s+(\d+)", dev)
     if m:
         out["wlan0_rx_bytes"], out["wlan0_tx_bytes"] = int(m.group(1)), int(m.group(2))
@@ -711,6 +1031,60 @@ def pc_summary(path):
     if sent:
         out["pc_tcp_sent_mean_per_s"] = round(sum(sent) / len(sent), 1)
     return out
+
+
+def presentmon_reduce(path, exclude_procs=("VirtualDesktop.Streamer", "svchost", "dwm", "explorer",
+                                            "oculus", "OVRServer")):
+    """Reduce a PresentMon capture (system-wide, so it needs no game process name up front) into the PC
+    game's own present-rate stats -- the one layer findings.md calls out as invisible to every other
+    sampler here (the headset/OVR telemetry only ever sees the HEADSET compositor's frame rate). Column
+    names vary across PresentMon versions, so this reads whichever known variant is present rather than
+    assuming one schema. Picks the process with the most in-window rows, excluding the streamer/OS
+    processes, as 'the game' -- same dedup strategy as vr_api_reduce's pid selection, for the same reason:
+    more than one process can be presenting frames in the window."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        rows = list(csv.DictReader(open(path, encoding="utf-8-sig")))
+    except OSError:
+        return {}
+    if not rows:
+        return {}
+    hdr = set(rows[0].keys())
+
+    def pick(*names):
+        return next((n for n in names if n in hdr), None)
+    app_col = pick("Application", "process_name", "ProcessName")
+    ms_col = pick("MsBetweenPresents", "msBetweenPresents", "ms_between_presents", "MsBetweenDisplayChange")
+    if not app_col or not ms_col:
+        return {"pc_game_fps_note": f"unrecognized PresentMon CSV schema ({sorted(hdr)[:6]}...)"}
+
+    def excluded(name):
+        low = (name or "").lower()
+        return any(x.lower() in low for x in exclude_procs)
+
+    from collections import Counter
+    counts = Counter(r[app_col] for r in rows if r.get(app_col) and not excluded(r[app_col]))
+    if not counts:
+        return {}
+    game = counts.most_common(1)[0][0]
+    fps = []
+    for r in rows:
+        if r.get(app_col) != game:
+            continue
+        try:
+            ms = float(r[ms_col])
+            if ms > 0:
+                fps.append(1000.0 / ms)
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not fps:
+        return {}
+    s = sorted(fps)
+    p1low = s[max(0, int(len(s) * 0.01) - 1)]
+    return {"pc_game_process": game, "pc_game_frame_count": len(fps),
+            "pc_game_fps_mean": round(sum(fps) / len(fps), 2), "pc_game_fps_min": round(min(fps), 2),
+            "pc_game_fps_1pct_low": round(p1low, 2)}
 
 
 def decay_events(run_dir, frac=0.4, min_s=20.0, gap_s=10.0, out_tsv=None):
@@ -1021,14 +1395,21 @@ def csv_upsert(path, id_cols, meas_cols, row):
 
 
 # ---------------------------------------------------------------- results
-def watch(run_id, interval=30, drop_frac=0.6, heartbeat_min=5):
+def watch(run_id, interval=30, drop_frac=0.6, heartbeat_min=5, beep=False, headset_beep=False):
     """Unattended watcher for a long soak: prints only when state changes (delivered rate collapsing, TCP
     retransmits appearing) plus a periodic heartbeat, so an episode gets timestamped even when nobody is
-    watching the monitor's status lines."""
+    watching the monitor's status lines. beep=True sounds an alert chime on DECAY SUSPECT / retransmit
+    spike (and a recovery chime once the rate is back to normal) -- useful for the same live AP/headset
+    placement testing `linktest` targets, but while an actual stream is running.
+    headset_beep additionally posts a silent notification-history marker on the headset (see
+    _alert_headset -- NOT an audible/visible alert, a verified dead end on this build); off by default,
+    still an on-device mutation."""
     import statistics as _stats
     run_dir = os.path.join(BASE, "runs", run_id)
-    print(f"watch started: {run_id} interval={interval}s drop_frac={drop_frac}", flush=True)
-    last_hb, low_streak, last_retrans = 0.0, 0, None
+    adb_ser = adb_serial() if headset_beep else None
+    print(f"watch started: {run_id} interval={interval}s drop_frac={drop_frac} beep={beep} "
+          f"headset_beep={headset_beep}", flush=True)
+    last_hb, low_streak, last_retrans, alarm = 0.0, 0, None, False
     while True:
         ser = _rate_series(run_dir)
         pc = read_tsv(os.path.join(run_dir, "pc_samples.tsv"))
@@ -1044,12 +1425,27 @@ def watch(run_id, interval=30, drop_frac=0.6, heartbeat_min=5):
             except (IndexError, TypeError, ValueError):
                 retr = 0.0
             low_streak = low_streak + 1 if cur < drop_frac * med else 0
+            spike = last_retrans is not None and retr > max(50.0, last_retrans * 10)
             if low_streak == 2:
                 print(f"[{now}] DECAY SUSPECT: rate {cur:.0f} Mbps vs median {med:.0f} ({cur / med * 100:.0f}%)"
                       f" | encoder {enc}% | retrans {retr:.0f}/s | ws {ws} MB", flush=True)
-            if last_retrans is not None and retr > max(50.0, last_retrans * 10):
+            if spike:
                 print(f"[{now}] TCP RETRANSMIT SPIKE: {retr:.0f}/s (prev {last_retrans:.0f}) | rate {cur:.0f} Mbps"
                       f" | encoder {enc}%", flush=True)
+            if beep or headset_beep:
+                bad = low_streak >= 2 or spike
+                if bad and not alarm:
+                    alarm = True
+                    if beep:
+                        _alert(degrade=True)
+                    if headset_beep:
+                        _alert_headset(adb_ser, degrade=True)
+                elif not bad and alarm and low_streak == 0:
+                    alarm = False
+                    if beep:
+                        _alert(degrade=False)
+                    if headset_beep:
+                        _alert_headset(adb_ser, degrade=False)
             last_retrans = retr
             if time.time() - last_hb >= heartbeat_min * 60:
                 last_hb = time.time()
@@ -1139,6 +1535,7 @@ def results(run_id, overlay_path=None):
                          out_tsv=os.path.join(run_dir, "controller_events.tsv")))
     res.update(codec_events(run_dir, ser, since_dev_s=vr_start,
                             out_tsv=os.path.join(run_dir, "codec_events.tsv")))
+    res.update(presentmon_reduce(os.path.join(run_dir, "presentmon.csv")))
     if clock:
         res["quest_clock_offset_s"] = clock.get("offset_s")
         res["quest_uptime_s"] = clock.get("dev_uptime_s")
@@ -1146,8 +1543,17 @@ def results(run_id, overlay_path=None):
         res["quest_cell_end_dev_s"] = clock.get("cell_end_dev_s")
     if sess:
         res["quest_session_start_dev_s"] = sess.get("start_dev_s")
-        res["quest_session_min"] = (round((sess["end_dev_s"] - sess["start_dev_s"]) / 60, 1) if sess.get("end_dev_s")
-                                    else round(res.get("vr_api_lines", 0) / 60, 1) or None)
+        segs = sess.get("segments")
+        if segs is not None:
+            # active_min excludes any gap where the streaming app wasn't running (e.g. headset asleep
+            # between segments) -- see write_session(). quest_session_segments > 1 flags that a
+            # sleep/wake or app-restart happened mid-monitor, worth knowing when reading the numbers.
+            res["quest_session_min"] = sess.get("active_min")
+            res["quest_session_segments"] = len(segs)
+        else:
+            # old-format session.json (single segment, no "segments" key) from a run predating this fix.
+            res["quest_session_min"] = (round((sess["end_dev_s"] - sess["start_dev_s"]) / 60, 1) if sess.get("end_dev_s")
+                                        else round(res.get("vr_api_lines", 0) / 60, 1) or None)
 
     json.dump(res, open(os.path.join(run_dir, "results.json"), "w"), indent=1)
 
@@ -1173,10 +1579,20 @@ if __name__ == "__main__":
     elif sys.argv[1] == "monitor":
         monitor(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 10800)
     elif sys.argv[1] == "watch":
-        watch(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 30)
+        flags = sys.argv[2:]
+        rest = [a for a in flags if a not in ("--beep", "--headset-beep")]
+        interval = int(rest[1]) if len(rest) > 1 else 30
+        watch(rest[0], interval, beep=("--beep" in flags), headset_beep=("--headset-beep" in flags))
     elif sys.argv[1] == "passive":
         passive(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "start")
     elif sys.argv[1] == "capture":
         capture(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 150)
     elif sys.argv[1] == "results":
         results(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+    elif sys.argv[1] == "fingerprint":
+        rest = sys.argv[2:]
+        tag = next((a.split("=", 1)[1] for a in rest if a.startswith("--tag=")), None)
+        fingerprint(rest[0], save_baseline=("--save-baseline" in rest), tag=tag)
+    elif sys.argv[1] == "linktest":
+        flags = sys.argv[2:]
+        linktest(beep=("--no-beep" not in flags), headset_beep=("--headset-beep" in flags))

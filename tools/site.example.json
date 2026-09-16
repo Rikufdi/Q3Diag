@@ -18,5 +18,11 @@
   "vd_switcher_exe": "",
   "ovr_metrics_dir": "/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics",
 
-  "elev_task": "PCVR-Elev"
+  "elev_task": "PCVR-Elev",
+
+  "_presentmon_comment": "Optional PC game-fps capture (see tools/Sample-GameFPS.ps1). Leave presentmon_exe empty to skip it. Not vendored -- download the console-app .exe (e.g. PresentMon-2.5.1-x64.exe) from https://github.com/GameTechDev/PresentMon/releases/latest and point presentmon_exe at it. No install/admin needed.",
+  "presentmon_exe": "",
+  "presentmon_args": "",
+
+  "dashboard_port": 8765
 }
