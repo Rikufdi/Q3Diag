@@ -59,7 +59,6 @@ runs/<run_id>/     per-run artifacts: samplers' TSVs, OVR CSV, VrApi logcat, res
 probe/<ts>/        read-only device snapshots + agent findings
 baseline/          iperf3 ramps, ping/AP-ping, 5 GHz vs 6 GHz comparison
 topology/          AP config, radio settings, environment lock
-test-content/      test patterns used to drive the encoder
 ```
 
 ### Harness
@@ -221,7 +220,6 @@ The repo carries the **reductions and the text telemetry** (~35 MB), not the raw
 | excluded | why |
 |---|---|
 | `runs/*/cap.pcapng`, `cap.etl` (875 MB) | regenerable by re-running a cell; no diff value |
-| `test-content/pattern-4k60.mp4` (2.7 GB) | regenerate locally — see below |
 | `probe/**/raw/`, `probe/**/*-raw/` | raw `adb` dumps; regenerate with `Quest-Probe.ps1` |
 | `runs/*/pc_config.json` | contains Virtual Desktop's DPAPI blobs (`ProtectedComputerID`, account tokens) — machine-bound secrets. A redacted copy is tracked as `pc_config.redacted.json` |
 | `topology/ap-radio.png` | the AP administration page renders the Wi-Fi passphrase in plaintext |
@@ -231,10 +229,6 @@ The repo carries the **reductions and the text telemetry** (~35 MB), not the raw
 addresses/BSSIDs, the desktop hostname and the Wi-Fi passphrase are replaced with `<placeholders>`;
 neighbouring networks seen in scan lists are redacted too. The measurements themselves are
 untouched.
-
-**Test content.** The motion and static cells were driven by a 4K60 test pattern played into the
-headset. Any 4K60 clip of comparable motion works; `test-content/static-frame.mp4` (a single static
-frame) is tracked because it is small and the "static" cells depend on it.
 
 ## Third-party
 

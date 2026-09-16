@@ -6,9 +6,6 @@
 runs/**/cap.pcapng
 runs/**/cap.etl
 
-# 2.7 GB 4K60 test pattern. Regenerate locally (see README "Test content").
-test-content/pattern-4k60.mp4
-
 # Machine-bound credentials: Virtual Desktop's DPAPI blobs (ProtectedComputerID,
 # Accounts.OculusQuest) are user+machine scoped secrets. Never publish.
 **/pc_config.json
