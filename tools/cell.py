@@ -1144,12 +1144,25 @@ def presentmon_reduce(path, exclude_procs=("VirtualDesktop.Streamer", "svchost",
             "pc_game_fps_1pct_low": round(p1low, 2)}
 
 
-def decay_events(run_dir, frac=0.4, min_s=20.0, gap_s=10.0, out_tsv=None):
+def decay_events(run_dir, frac=0.4, min_s=20.0, gap_s=10.0, out_tsv=None, session=None, off=0.0):
     """The community's 'VD bitrate decay' = a sustained collapse of the delivered rate. Detect every
     episode and report the PC-side encoder/TCP state inside it (+ the minute before it) versus the whole
     session: encoder utilization falling means the encoder stopped producing; a retransmit spike means the
-    TCP transport collapsed."""
+    TCP transport collapsed.
+
+    `session`/`off`, when given, restrict the analysis to the streaming app's own active segment(s) --
+    session.json's start_dev_s/end_dev_s, converted from device-epoch to the PC-epoch _rate_series() uses
+    via `t - off`. Without this, a monitor that keeps sampling for a while after the app closes (or before
+    it starts) sees delivered rate fall to ~0 in that dead time and misreports it as a decay episode --
+    exactly the false pattern this whole detector exists to rule out. Confirmed live 2026-09-17: a 96s
+    session inside a 117s monitor run flagged a 26s "decay episode" that lined up almost exactly with the
+    tail after the app closed (encoder utilization and TCP send rate both collapsed to ~0 in that window,
+    with zero retransmits -- a stopped source, not a degraded link)."""
     ser = _rate_series(run_dir)
+    segs = (session or {}).get("segments")
+    if segs:
+        windows = [(s["start_dev_s"] - off, s.get("end_dev_s", time.time() + off) - off) for s in segs]
+        ser = [(t, r) for t, r in ser if any(w0 <= t <= w1 for w0, w1 in windows)]
     if len(ser) < 20:
         return {}
     import statistics as _stats
@@ -1597,7 +1610,8 @@ def results(run_id, overlay_path=None):
     res.update(sf_stats(os.path.join(run_dir, "sf_latency_samples.tsv")))
     res.update(p2p_stats(os.path.join(run_dir, "quest_net_samples.tsv")))
     res.update(pc_summary(os.path.join(run_dir, "pc_samples.tsv")))
-    res.update(decay_events(run_dir, out_tsv=os.path.join(run_dir, "decay_episodes.tsv")))
+    res.update(decay_events(run_dir, out_tsv=os.path.join(run_dir, "decay_episodes.tsv"),
+                            session=sess, off=(clock.get("offset_s") or 0.0)))
     res.update(cm_reduce(os.path.join(run_dir, "cm_wifi_snapshots.txt"),
                          session_start_dev_s=start_dev,
                          offset_s=(clock.get("offset_s") or 0.0),

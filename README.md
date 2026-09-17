@@ -65,7 +65,8 @@ topology/          AP config, radio settings, environment lock
 
 | file | role |
 |---|---|
-| `tools/cell.py` | the workhorse: `serial`, `layer`, `capture`, `monitor`, `watch`, `passive`, `results`, `fingerprint`, `linktest` |
+| `tools/wizard.py` | guided interactive session runner for a human at the keyboard (see Quickstart below) |
+| `tools/cell.py` | the workhorse: `serial`, `layer`, `capture`, `monitor`, `stop`, `watch`, `passive`, `results`, `fingerprint`, `linktest` |
 | `tools/Sample-Quest.ps1` | headset sampler: MAC counters, `/proc/net/*`, radio state, thermals |
 | `tools/Sample-PC.ps1` | PC sampler: NVENC/GPU utilisation, windows TCP retransmits, streamer RSS |
 | `tools/Sample-GameFPS.ps1` | optional PC-side game frame-time capture via PresentMon (not vendored) |
@@ -153,6 +154,42 @@ script resolves through it (`qsite.path("tshark")` in Python, `Resolve-SiteTool 
 PowerShell). Any key can be overridden per-invocation with `QUEST3_<KEY>`, e.g.
 `QUEST3_QUEST_IP=192.0.2.10 python tools/cell.py serial`. Empty keys fall back to PATH and the
 standard install locations, then fail with instructions.
+
+## Quickstart
+
+Once the one-time Setup above is done, the simplest way to run a session is:
+
+```powershell
+python tools/wizard.py
+```
+
+This walks you through one full session interactively: it connects to the headset (recovering a
+dropped wireless-adb link automatically, only asking you to plug in a USB cable if that fails —
+see the wizard's own connection-recovery logic if you're curious why that's a two-step fallback),
+checks Virtual Desktop/OVR is running, asks for the stack/codec/bitrate/band/content for this
+session, pauses so you can actually set codec-then-bitrate in the headset (order matters — see
+`findings.md`), then starts the live dashboard and sampling. Play, press Enter when you're done,
+and it reduces the run and prints a plain-language verdict against your saved baseline for that
+configuration, e.g.:
+
+```
+Verdict: consistent with the saved baseline -- no metric drifted beyond its threshold.
+```
+
+or, if something moved:
+
+```
+Verdict: 1 metric(s) drifted beyond the baseline:
+  - retry_rate_pct: 2.599 -> 4.802 (delta +2.203)
+```
+
+No prior baseline for that exact configuration yet? The wizard says so and saves this run as the
+new baseline instead, same as `cell.py fingerprint` does on its own.
+
+This is a friendlier front door onto the exact same harness described below (`cell.py`'s
+`monitor`/`stop`/`results`/`fingerprint`, `dashboard.py`) — not a separate code path. Prefer the
+manual commands directly for scripted/unattended use, or if you want more control over an
+individual step than the wizard's prompts expose.
 
 ## Running a monitored session
 
