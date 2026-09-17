@@ -4,6 +4,10 @@
 Usage:
   python cell.py serial                          # print the resolved wireless-adb endpoint
   python cell.py capture <run_id> [duration_s]   # pktmon + device sampler + ping + VrApi logcat
+  python cell.py monitor <run_id> [max_seconds]  # open-ended live-session sampling (default 10800s / 3h)
+  python cell.py stop <run_id>                   # ask a running `monitor <run_id>` to shut down cleanly
+                                                  # (same effect as Ctrl+C; use when it isn't attached to
+                                                  # your own console -- see monitor()'s docstring)
   python cell.py results <run_id> [overlay.json] # analyze + deltas + ovr + write results
   python cell.py fingerprint <run_id> [--save-baseline] [--tag=NAME]
                                                   # diff results.json against a saved per-config baseline
@@ -336,14 +340,18 @@ def linktest(interval=1.0, rssi_drop_db=8, retry_pct_thresh=5.0, beep=True, head
 _serial_cache = None
 
 
-def write_session(path, stack, segments):
+def write_session(path, stack, segments, off=0.0):
     """Write session.json from the full list of {proc, start_dev_s, [end_dev_s]} segments observed so
     far in this monitor run. Stays backward compatible with the old single-session shape at the top
     level (start_dev_s = first segment's start, end_dev_s = last segment's end if it has closed, proc =
     most recent) so `results()` and any old tooling reading session.json need no changes; `segments` and
     `active_min` (sum of each segment's duration, i.e. excluding any gap where the app wasn't running --
-    such as while the headset was asleep) are additive fields for anything that wants the full picture."""
-    active_min = round(sum((s.get("end_dev_s", time.time()) - s["start_dev_s"]) for s in segments) / 60, 2)
+    such as while the headset was asleep) are additive fields for anything that wants the full picture.
+    `off` is the headset<->PC clock offset (seconds, headset ahead is positive): start_dev_s/end_dev_s
+    are always in device-epoch terms, so an open segment's still-running duration must be estimated with
+    `time.time() + off`, not raw `time.time()` -- using the wrong clock domain understates (or, when off
+    is large enough, makes negative) the duration of whichever segment is still open when this is called."""
+    active_min = round(sum((s.get("end_dev_s", time.time() + off) - s["start_dev_s"]) for s in segments) / 60, 2)
     doc = {"stack": stack, "proc": segments[-1]["proc"], "start_dev_s": segments[0]["start_dev_s"],
            "segments": segments, "active_min": active_min}
     if "end_dev_s" in segments[-1]:
@@ -351,16 +359,42 @@ def write_session(path, stack, segments):
     json.dump(doc, open(path, "w"), indent=1)
 
 
+def stop_monitor(run_id):
+    """Ask a running `monitor <run_id>` to shut down cleanly (see the stop-sentinel comment in monitor()):
+    creates runs/<run_id>/.stop, which the monitor loop notices within 0.25s and exits on, running its
+    `finally` block (samplers terminated, session.json/clock.json closed out correctly) exactly like a
+    Ctrl+C would -- unlike a hard kill (Ctrl+Break, `taskkill /F`, hub stop), which skips `finally`
+    entirely and can leave an open session segment's duration wrong (see write_session's `off` docstring).
+    Prefer Ctrl+C when monitor is running attached to your own interactive console; use this instead
+    whenever it isn't (started detached/backgrounded, or from a different shell/process than the one
+    watching it) since a hard kill is otherwise the only externally available option in that case."""
+    run_dir = os.path.join(BASE, "runs", run_id)
+    if not os.path.isdir(run_dir):
+        raise RuntimeError(f"no such run: {run_dir}")
+    open(os.path.join(run_dir, ".stop"), "w").close()
+    print(f"stop requested for {run_id} -- monitor will exit within ~1s and finish writing its artifacts")
+
+
 def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
     """Open-ended monitoring of a live session (no pktmon: the elevated task is intentionally absent).
-    Samples until killed or max_seconds, prints one status line per status_every, and detects the
-    streaming client's start/stop so the reduction can window on the session instead of the monitor."""
+    Samples until killed, stopped (`cell.py stop <run_id>` or Ctrl+C), or max_seconds elapses; prints one
+    status line per status_every, and detects the streaming client's start/stop so the reduction can
+    window on the session instead of the monitor."""
     run_dir = os.path.join(BASE, "runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
     if not os.path.exists(os.path.join(run_dir, "settings.json")):
         json.dump({"run_id": run_id, "stack": stack, "codec": "live", "bitrate_mbps": None,
                    "content": "motion", "band": "6g"},
                   open(os.path.join(run_dir, "settings.json"), "w"), indent=1)
+
+    # Graceful-stop sentinel: `cell.py stop <run_id>` (or just touching this file) asks the loop below to
+    # exit on its next 0.25s tick, so the `finally` block below still runs -- closing samplers cleanly and
+    # writing a correct session.json/clock.json, unlike a hard kill (Ctrl+Break, `taskkill /F`, hub stop),
+    # which skips `finally` entirely. A stale sentinel from a previous run under this same run_id would
+    # otherwise stop the new one instantly, so clear it before the loop starts.
+    stop_path = os.path.join(run_dir, ".stop")
+    if os.path.exists(stop_path):
+        os.remove(stop_path)
 
     ser = adb_serial()
     clock = clock_sample(ser)
@@ -438,8 +472,13 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
             pass
     samples = {"wifi_prev": None, "ping_replies": 0, "ping_timeouts": 0, "sf_frames": 0.0}
     last_status = 0.0
+    stopped_gracefully = False
     try:
         while time.time() - (start_dev - off) < max_seconds:
+            if os.path.exists(stop_path):
+                stopped_gracefully = True
+                print(f"[{time.strftime('%H:%M:%S')}] stop requested ({stop_path}) -- shutting down cleanly")
+                break
             now = time.time()
             if now >= sf_next:
                 if sf_layer is None or now - sf_found_at > 20:
@@ -469,11 +508,11 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
                 if procs and current is None:
                     current = {"proc": procs, "start_dev_s": round(time.time() + off, 3)}
                     segments.append(current)
-                    write_session(files["session"], stack, segments)
+                    write_session(files["session"], stack, segments, off)
                     print(f"[{time.strftime('%H:%M:%S')}] SESSION DETECTED (#{len(segments)}): {procs}")
                 elif current is not None and not procs:
                     current["end_dev_s"] = round(time.time() + off, 3)
-                    write_session(files["session"], stack, segments)
+                    write_session(files["session"], stack, segments, off)
                     print(f"[{time.strftime('%H:%M:%S')}] SESSION ENDED (#{len(segments)}, "
                           f"{(current['end_dev_s'] - current['start_dev_s']) / 60:.1f} min) "
                           f"-- will re-arm if the app restarts (e.g. after headset sleep/wake)")
@@ -495,7 +534,20 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
         for p in (logcat, ping, sampler, pc, presentmon):
             if p is None:
                 continue
-            p.terminate()
+            # taskkill /T, not p.terminate(): the PowerShell-wrapped samplers (sampler, pc, presentmon)
+            # each launch their own child (presentmon in particular spawns PresentMon-*.exe underneath
+            # it), and Windows TerminateProcess -- what Popen.terminate() calls -- kills only the one PID
+            # handed to it, not that PID's children. Without /T, a stop (graceful or hard) leaves those
+            # grandchildren running and still holding their output files open, e.g. an orphaned
+            # PresentMon-*.exe blocking a later `rm` of the run directory -- confirmed by hand while
+            # testing this cleanup path. /F is not "less graceful" here: Windows has no signal-based
+            # terminate the way Unix does, so Popen.terminate() was already an immediate kill of whatever
+            # it reached; this just makes that kill reach the whole subtree instead of stopping short.
+            try:
+                subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
             try:
                 p.wait(timeout=10)
             except subprocess.TimeoutExpired:
@@ -505,8 +557,10 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
         if current is not None and "end_dev_s" not in current:
             current["end_dev_s"] = clock["cell_end_dev_s"]
         if segments:
-            write_session(files["session"], stack, segments)
+            write_session(files["session"], stack, segments, off)
         json.dump(clock, open(os.path.join(run_dir, "clock.json"), "w"), indent=1)
+        if stopped_gracefully and os.path.exists(stop_path):
+            os.remove(stop_path)
         print("monitor stopped; artifacts in " + run_dir, flush=True)
 
 
@@ -805,8 +859,11 @@ def passive(run_id, phase, stack="vd"):
                   open(os.path.join(run_dir, "settings.json"), "w"), indent=1)
     json.dump(res, open(os.path.join(run_dir, "results.json"), "w"), indent=1)
     s = json.load(open(os.path.join(run_dir, "settings.json")))
-    csv_upsert(os.path.join(BASE, "results.csv"), ID_COLS, MEAS_COLS,
-               {**{c: s.get(c) for c in ID_COLS}, **res})
+    if is_private_run(run_id):
+        print(f"private run ({PRIVATE_RUN_PREFIX}* prefix) -- skipping results.csv, results.json only")
+    else:
+        csv_upsert(os.path.join(BASE, "results.csv"), ID_COLS, MEAS_COLS,
+                   {**{c: s.get(c) for c in ID_COLS}, **res})
     print("passive session:", res.get("quest_session_min"), "min | avg down", res.get("passive_avg_down_mbps"),
           "Mbps | retry", res.get("retry_rate_pct"), "% | lost", res.get("quest_lost_tx_delta"),
           "| ovr fps", res.get("ovr_avg_fps"), "stale", res.get("ovr_stale_frames_window"),
@@ -1369,6 +1426,18 @@ def summarize_env(path):
     return out
 
 
+PRIVATE_RUN_PREFIX = "priv_"
+
+
+def is_private_run(run_id):
+    """A run_id starting with `priv_` (e.g. priv_ram3600_..., matched via `runs/priv_*/` in .gitignore)
+    is this rig's own scratch/sanity-check data, not part of the published dataset -- results()/passive()
+    skip appending its row to the shared, git-tracked results.csv so it can never end up committed by
+    forgetting a manual step. results.json still gets written inside the (gitignored) run directory, so
+    fingerprint/dashboard/local inspection all still work; only the row in the tracked CSV is skipped."""
+    return run_id.startswith(PRIVATE_RUN_PREFIX)
+
+
 def csv_upsert(path, id_cols, meas_cols, row):
     """Append a run's row, replacing any earlier row with the same id (re-running `results` must update,
     not duplicate)."""
@@ -1559,9 +1628,12 @@ def results(run_id, overlay_path=None):
 
     s = json.load(open(os.path.join(run_dir, "settings.json")))
     id_cols, meas_cols = ID_COLS, MEAS_COLS
-    csv_upsert(os.path.join(BASE, "results.csv"), id_cols, meas_cols,
-               {**{c: s.get(c) for c in id_cols}, **res})
-    print("wrote results.json + results.csv")
+    if is_private_run(run_id):
+        print(f"private run ({PRIVATE_RUN_PREFIX}* prefix) -- skipping results.csv, results.json only")
+    else:
+        csv_upsert(os.path.join(BASE, "results.csv"), id_cols, meas_cols,
+                   {**{c: s.get(c) for c in id_cols}, **res})
+    print("wrote results.json" + ("" if is_private_run(run_id) else " + results.csv"))
     print("wire_tx_mbps:", res["wire_tx_mbps"], "retry:", res["retry_rate_pct"],
           "ping_p95:", res.get("ping_rtt_p95_ms"), "vr_api_fps:", res.get("vr_api_fps_mean"),
           "stale:", res.get("vr_api_stale_total"))
@@ -1578,6 +1650,8 @@ if __name__ == "__main__":
         print(find_sf_layer(ser) or "")
     elif sys.argv[1] == "monitor":
         monitor(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 10800)
+    elif sys.argv[1] == "stop":
+        stop_monitor(sys.argv[2])
     elif sys.argv[1] == "watch":
         flags = sys.argv[2:]
         rest = [a for a in flags if a not in ("--beep", "--headset-beep")]

@@ -158,6 +158,7 @@ standard install locations, then fail with instructions.
 
 ```bash
 python tools/cell.py monitor <run_id> 10800     # 3 h of sampling; survives across shells
+python tools/cell.py stop    <run_id>           # ask a running monitor to shut down cleanly (see below)
 python tools/cell.py watch   <run_id> 30        # optional: alert on state change only
 python tools/cell.py results <run_id>           # reduce -> results.json + a row in results.csv
 
@@ -212,6 +213,16 @@ learned the hard way:
   `cell.py` does (`_read_text` / `read_tsv`) — do not open those files with a bare `open()`.
 - **`hub stop` / process kill hard-kills.** A monitor's `finally` may not run, so the clock and cell
   window are written at *start*. Do not move that write into cleanup.
+- **Stopping a monitor cleanly.** Ctrl+C works if `monitor` is attached to your own interactive
+  console, but that's often not the case — e.g. launched detached/backgrounded, or from a different
+  shell/process than the one watching it, where Windows console-control-event delivery from the
+  outside is unreliable at best. `python tools/cell.py stop <run_id>` works in every case: it drops a
+  `.stop` sentinel file the monitor loop polls every 0.25 s, so it exits through the same `finally`
+  block a Ctrl+C would — samplers terminated properly, `session.json`/`clock.json` closed out with a
+  correctly-ended last segment — instead of the hard-kill path above, which skips that and can leave a
+  still-open segment's duration computed from the wrong clock domain (`quest_session_min` in
+  `results.json`; harmless to `fingerprint`, since that field isn't one of its tracked metrics, but
+  wrong on its own terms).
 
 ## Data policy
 
@@ -229,6 +240,13 @@ The repo carries the **reductions and the text telemetry** (~35 MB), not the raw
 addresses/BSSIDs, the desktop hostname and the Wi-Fi passphrase are replaced with `<placeholders>`;
 neighbouring networks seen in scan lists are redacted too. The measurements themselves are
 untouched.
+
+**Private/scratch runs.** Not every run is meant to become part of the published dataset — a quick
+sanity check after a hardware change, say. Prefix that run's `run_id` with `priv_` (e.g.
+`priv_ram3600_...`) and it's excluded automatically: `runs/priv_*/` is git-ignored, and
+`cell.py results`/`passive` skip appending its row to the tracked `results.csv`. Everything else about
+it works normally — `results.json` is still written, `fingerprint`/`dashboard.py` still work locally —
+it's only kept out of what gets committed.
 
 ## Third-party
 

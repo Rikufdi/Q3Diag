@@ -32,6 +32,12 @@ RUN_ID = None
 # job as a live AP-placement-testing readout (see cell.py linktest/watch --beep for the same tradeoff).
 RETRY_WINDOW_S = 10
 
+# delivered_mbps had the same problem retry_pct/lost_pct used to have: cell._rate_series() yields one
+# point per pair of consecutive ~2s wlan0-byte-counter samples, and encoder VBR + Wi-Fi frame
+# aggregation both make that raw 2s figure swing well outside the true average. Same fix, same
+# reasoning as RETRY_WINDOW_S above: average the last few points instead of showing the latest one raw.
+DELIVERED_WINDOW_S = 6
+
 
 def _last_wifi_rate(run_dir, window_s=RETRY_WINDOW_S):
     rows = cell.read_tsv(os.path.join(run_dir, "quest_wifi_samples.tsv"))
@@ -92,7 +98,12 @@ def status(run_id):
         rate = []
     t0 = rate[0][0] if rate else 0
     out["rate_series"] = [[round(t - t0, 1), round(r, 1)] for t, r in rate]
-    out["delivered_mbps"] = round(rate[-1][1], 1) if rate else None
+    if rate:
+        t_last = rate[-1][0]
+        window = [r for t, r in rate if t_last - t <= DELIVERED_WINDOW_S]
+        out["delivered_mbps"] = round(sum(window) / len(window), 1)
+    else:
+        out["delivered_mbps"] = None
     sess_path = os.path.join(run_dir, "session.json")
     if os.path.exists(sess_path):
         try:
@@ -152,7 +163,7 @@ const TILES = [
     v => v + " dBm", v => v !== null && v < -65 ? "warn" : ""],
   ["tx_link_mbps", "Radio link rate", "The PHY rate the Wi-Fi radio negotiated with the AP. This is a ceiling, not the actual data flowing -- see Delivered rate.",
     v => v + " Mbps", () => ""],
-  ["delivered_mbps", "Delivered rate", "The actual video data rate landing on the headset right now, measured from Wi-Fi byte counters.",
+  ["delivered_mbps", "Delivered rate", "The video data rate landing on the headset, measured from Wi-Fi byte counters and averaged over the last ~6s so normal VBR/burst jitter doesn't dominate the number.",
     v => v + " Mbps", () => ""],
   ["retry_pct", "Wi-Fi retry rate", "Percent of Wi-Fi packets that needed a retransmit (missed ACK), averaged over the last ~10s so it isn't jumpy. Some retries are normal; above ~5% suggests interference or a weak link.",
     v => v + "%", v => v > 5 ? "bad" : v > 2 ? "warn" : ""],

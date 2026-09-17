@@ -45,6 +45,12 @@ runs/**/presentmon.csv
 # not a portable measurement -- regenerate with `cell.py fingerprint <run_id> --save-baseline`.
 baseline/fingerprints/
 
+# Private/scratch runs: any run_id you prefix with "priv_" (e.g. priv_ram3600_...) is a personal
+# sanity-check, not part of the published dataset. `cell.py results`/`passive` already skip its row in
+# the tracked results.csv for the same reason (see is_private_run() in tools/cell.py) -- this covers the
+# rest of the run directory (TSVs, results.json, fingerprint_diff.json, ...).
+runs/priv_*/
+
 # Python
 __pycache__/
 *.py[cod]
