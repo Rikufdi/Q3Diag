@@ -54,3 +54,8 @@ runs/priv_*/
 # Python
 __pycache__/
 *.py[cod]
+
+# Release build: scratch (downloaded platform-tools) and output (PyInstaller dist + zip). Both fully
+# regenerable by `python release/build_release.py` -- see release/README.md.
+release/build/
+release/dist/

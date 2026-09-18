@@ -43,8 +43,9 @@ def reduce_cell(runs_dir, run_id, quest_ip=None, pc_ip=PC_IP_DEFAULT, window=Non
         # fall back to .etl (no pcap conversion done yet)
         cap = os.path.join(run_dir, "cap.etl")
     if not os.path.exists(cap):
-        print(json.dumps({"error": "no capture found in " + run_dir}))
-        return
+        err = {"error": "no capture found in " + run_dir}
+        print(json.dumps(err))
+        return err
 
     txt = tshark_fields(cap, ["frame.time_relative", "ip.src", "ip.dst", "tcp.len", "udp.length"], "tcp || udp")
     lo, hi = (0.0, float("inf"))
@@ -99,6 +100,7 @@ def reduce_cell(runs_dir, run_id, quest_ip=None, pc_ip=PC_IP_DEFAULT, window=Non
         "window_end_s": round(t_max, 3) if t_max is not None else None,
     }
     print(json.dumps(result))
+    return result
 
 
 def _load_json(p):

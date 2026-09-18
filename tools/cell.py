@@ -33,6 +33,7 @@ Per-cell device-side instrumentation (all optional files, written into runs/<run
 """
 import sys, os, re, time, json, csv, socket, subprocess
 import qsite
+import analyze
 
 ADB = qsite.path("adb")
 QUEST_IP = qsite.get("quest_ip")
@@ -53,7 +54,7 @@ MEAS_COLS = [
     "overlay_latency_network_ms", "overlay_latency_decode_ms", "overlay_bitrate_mbps", "overlay_wifi_mbps",
     "ovr_rows", "ovr_window_s", "ovr_avg_fps", "ovr_fps_min", "ovr_seconds_below_85fps", "ovr_stale_frames_window",
     "ovr_stale_seconds", "ovr_max_consecutive_stale", "ovr_max_repeated_frames", "ovr_skipped_frames",
-    "ovr_throttle_seconds", "ovr_battery_temp_c", "ovr_gpu_util_pct", "ovr_cpu_util_pct",
+    "ovr_throttle_pct_mean", "ovr_battery_temp_c", "ovr_gpu_util_pct", "ovr_cpu_util_pct",
     "ovr_source_file", "ovr_stale", "ovr_file_mtime_dev_s",
     "ping_n", "ping_rtt_p50_ms", "ping_rtt_p90_ms", "ping_rtt_p95_ms", "ping_rtt_p99_ms",
     "ping_rtt_max_ms", "ping_loss_pct",
@@ -375,11 +376,89 @@ def stop_monitor(run_id):
     print(f"stop requested for {run_id} -- monitor will exit within ~1s and finish writing its artifacts")
 
 
-def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
+def _pc_find_pid(exe_name):
+    """PID of a running PC process by exact image name, via `tasklist` -- used to confirm PresentMon's
+    --process_name target is actually alive (see monitor()'s presentmon_target handling / the dashboard's
+    "Game exe found" tile). Returns None if not currently running."""
+    out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/FO", "CSV", "/NH"],
+                         capture_output=True, text=True, encoding="utf-8", errors="ignore").stdout
+    if not out or "No tasks" in out:
+        return None
+    row = next(csv.reader(out.splitlines()), None)
+    if row and len(row) >= 2:
+        try:
+            return int(row[1])
+        except ValueError:
+            return None
+    return None
+
+
+_PRESENTMON_HINT_IGNORE = {
+    "System", "System Idle Process", "svchost.exe", "explorer.exe", "dwm.exe", "csrss.exe",
+    "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe", "conhost.exe", "RuntimeBroker.exe",
+    "SearchHost.exe", "Taskmgr.exe", "cmd.exe", "powershell.exe", "python.exe", "pythonw.exe",
+    "WindowsTerminal.exe", "VirtualDesktop.Streamer.exe", "OVRServer_x64.exe",
+}
+
+
+def _fuzzy_match_process(hint):
+    """Resolve a free-text game-name hint (what a human actually types, e.g. "half life alyx") against
+    whatever's running on the PC right now, for monitor()'s presentmon_hint. A plain substring check
+    against the exe name (minus ".exe", spaces ignored) runs first since it's the common case and never
+    produces a surprising match; difflib's fuzzy ratio is the fallback for a looser guess (e.g. "hlvr"
+    for "hlvr.exe" already hits the substring path, but "halflifealyx" needs the ratio path against
+    "hlvr" to have any chance). Returns the exact image name (with ".exe") or None."""
+    import difflib
+    out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                         encoding="utf-8", errors="ignore").stdout
+    names = set()
+    for row in csv.reader(out.splitlines()):
+        if row and row[0].lower().endswith(".exe") and row[0] not in _PRESENTMON_HINT_IGNORE:
+            names.add(row[0])
+    if not names:
+        return None
+    hint_norm = hint.lower().replace(" ", "")
+    substr = [n for n in sorted(names) if hint_norm in n[:-4].lower().replace(" ", "")]
+    if substr:
+        return substr[0]
+    stripped = {n[:-4]: n for n in names}
+    best = difflib.get_close_matches(hint, list(stripped.keys()), n=1, cutoff=0.45)
+    return stripped[best[0]] if best else None
+
+
+PRESENTMON_HINT_WINDOW_S = 300  # how long after VD/Air Link connects to keep trying to resolve a hint
+
+
+def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_target=None,
+            presentmon_hint=None):
     """Open-ended monitoring of a live session (no pktmon: the elevated task is intentionally absent).
     Samples until killed, stopped (`cell.py stop <run_id>` or Ctrl+C), or max_seconds elapses; prints one
     status line per status_every, and detects the streaming client's start/stop so the reduction can
-    window on the session instead of the monitor."""
+    window on the session instead of the monitor.
+
+    Two ways to get PresentMon an exact game process name instead of it guessing (see
+    presentmon_reduce()'s docstring for why guessing is unreliable):
+    - presentmon_target: an exact PC image name (e.g. "hlvr.exe") already known up front. Passed
+      straight to Sample-GameFPS.ps1's --process_name, so PresentMon only ever captures that process --
+      the more efficient path, for anyone who already knows the exe name (a manual/advanced cell.py
+      caller, typically).
+    - presentmon_hint: a free-text guess at the game's name (e.g. "half life alyx"), for the normal case
+      where the actual game isn't running yet when this is asked -- a VR title is almost always launched
+      *after* VD/Air Link connects, sometimes minutes later (the wizard asks for this hint before the
+      session even starts, precisely because it doesn't need the game running to answer). PresentMon
+      isn't even started yet in this case: once VD/Air Link is actually detected connected (see session
+      detection below), the hint is fuzzy-matched against `tasklist` every status_every tick for up to
+      PRESENTMON_HINT_WINDOW_S seconds *from that point*, not from monitor start -- catching the game
+      whenever the player actually launches it, without guessing indefinitely against whatever else gets
+      opened later in a multi-hour session. PresentMon is only launched once a match is confirmed
+      running, targeted at that exact process from the start via --process_name, for whatever's left of
+      max_seconds -- no system-wide capture to filter down after the fact, and if the hint never
+      resolves, PresentMon simply never runs at all this session (correctly: there would be nothing
+      right to target anyway).
+    Either way, the resolved name (or the fact that nothing ever matched) is written to
+    presentmon_target.json -- what the dashboard's "Game exe found" tile reads, and what
+    results()/presentmon_reduce() use to report a real number or a graceful "never showed up" note
+    instead of a guess."""
     run_dir = os.path.join(BASE, "runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
     if not os.path.exists(os.path.join(run_dir, "settings.json")):
@@ -412,7 +491,7 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
               "layers": "sf_layers.log", "logcat": "vr_api_logcat.txt",
               "cm": "cm_wifi_snapshots.txt", "pc": "pc_samples.tsv",
               "ping": "ping_samples.txt", "session": "session.json",
-              "presentmon": "presentmon.csv"}.items()}
+              "presentmon": "presentmon.csv", "presentmon_target": "presentmon_target.json"}.items()}
 
     sampler = subprocess.Popen(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SAMPLER,
@@ -428,17 +507,40 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
     ping = subprocess.Popen(["ping", "-n", str(max_seconds), "-w", "1000", QUEST_IP],
                             stdout=open(files["ping"], "a"), stderr=subprocess.DEVNULL)
 
-    presentmon = None
-    presentmon_exe = qsite.get("presentmon_exe")
-    if presentmon_exe and os.path.exists(presentmon_exe):
-        presentmon = subprocess.Popen(
+    def _start_presentmon(target_name, remaining_seconds):
+        p = subprocess.Popen(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", qsite.script("game_fps_sampler"),
              "-PresentMonExe", presentmon_exe, "-OutFile", files["presentmon"],
-             "-Seconds", str(max_seconds + 60), "-ExtraArgs", qsite.get("presentmon_args", "")],
+             "-Seconds", str(remaining_seconds + 60), "-ExtraArgs", qsite.get("presentmon_args", ""),
+             "-TargetProcess", target_name or ""],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"PresentMon game-fps capture started -> {files['presentmon']}")
+        if target_name:
+            print(f"PresentMon game-fps capture started, targeting '{target_name}' -> {files['presentmon']}")
+        else:
+            print(f"PresentMon game-fps capture started (system-wide, no target given) -> {files['presentmon']}")
+        return p
+
+    presentmon = None
+    presentmon_target_found = False
+    presentmon_hint_deadline = None
+    presentmon_exe = qsite.presentmon_exe()
+    if presentmon_exe and os.path.exists(presentmon_exe):
+        if presentmon_hint and not presentmon_target:
+            # Defer starting PresentMon at all until the hint resolves to an exact process (see the
+            # status-tick loop below) -- no point capturing system-wide (extra data, back to the
+            # ambiguous "most frames" guess if it's ever used) for the stretch before the game even
+            # exists to be found. Worst case, the hint never resolves and PresentMon never runs at all
+            # this session -- exactly the right outcome, since there would be nothing correct to target
+            # anyway.
+            print(f"PresentMon: waiting to see '{presentmon_hint}' launch before starting capture "
+                  f"(up to {PRESENTMON_HINT_WINDOW_S // 60} min after VD/Air Link connects)...")
+        else:
+            presentmon = _start_presentmon(presentmon_target, max_seconds)
     else:
-        print("PresentMon not configured (site.json 'presentmon_exe') -- skipping PC game-fps capture")
+        print("PresentMon missing, skipping PC-side fps collection. Download the console-app build "
+              "from https://github.com/GameTechDev/PresentMon/releases/latest, save it as "
+              f"PresentMon.exe in {qsite.TOOLS_DIR} (or set presentmon_exe in site.json) to also get "
+              "PC-side fps data next run.")
 
     start_dev = time.time() + off
     sf_layer, sf_prev, sf_next, sf_found_at = None, 0, 0.0, 0.0
@@ -510,6 +612,16 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
                     segments.append(current)
                     write_session(files["session"], stack, segments, off)
                     print(f"[{time.strftime('%H:%M:%S')}] SESSION DETECTED (#{len(segments)}): {procs}")
+                    if presentmon_hint_deadline is None and presentmon_hint and not presentmon_target_found:
+                        # The clock on resolving the hint starts from VD/Air Link actually connecting,
+                        # not from monitor start -- a VR title is almost always launched after that,
+                        # sometimes minutes later, so starting the window any earlier would burn through
+                        # it before the game even exists to be found.
+                        presentmon_hint_deadline = now + PRESENTMON_HINT_WINDOW_S
+                        # "searching": True lets the dashboard tell "still looking" apart from "nothing
+                        # requested" (file simply absent) or "gave up" (searching: False, process: None).
+                        json.dump({"process": None, "pid": None, "hint": presentmon_hint, "found_at": None,
+                                  "searching": True}, open(files["presentmon_target"], "w"), indent=1)
                 elif current is not None and not procs:
                     current["end_dev_s"] = round(time.time() + off, 3)
                     write_session(files["session"], stack, segments, off)
@@ -517,6 +629,34 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
                           f"{(current['end_dev_s'] - current['start_dev_s']) / 60:.1f} min) "
                           f"-- will re-arm if the app restarts (e.g. after headset sleep/wake)")
                     current = None
+                if presentmon_target and not presentmon_target_found:
+                    pid = _pc_find_pid(presentmon_target)
+                    if pid:
+                        presentmon_target_found = True
+                        json.dump({"process": presentmon_target, "pid": pid, "searching": False,
+                                  "found_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                  open(files["presentmon_target"], "w"), indent=1)
+                        print(f"[{time.strftime('%H:%M:%S')}] PRESENTMON TARGET FOUND: "
+                              f"{presentmon_target} (PID {pid})")
+                elif presentmon_hint and not presentmon_target_found and presentmon_hint_deadline is not None:
+                    match = _fuzzy_match_process(presentmon_hint)
+                    pid = _pc_find_pid(match) if match else None
+                    if pid:
+                        presentmon_target_found = True
+                        remaining = max(60, int(max_seconds - (now - (start_dev - off))))
+                        presentmon = _start_presentmon(match, remaining)
+                        json.dump({"process": match, "pid": pid, "hint": presentmon_hint, "searching": False,
+                                  "found_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                  open(files["presentmon_target"], "w"), indent=1)
+                        print(f"[{time.strftime('%H:%M:%S')}] PRESENTMON TARGET FOUND: {match} "
+                              f"(PID {pid}, matched from hint '{presentmon_hint}') -- capture starting now")
+                    elif now > presentmon_hint_deadline:
+                        presentmon_target_found = True  # stop trying; one final write, then leave it alone
+                        json.dump({"process": None, "pid": None, "hint": presentmon_hint, "found_at": None,
+                                  "searching": False}, open(files["presentmon_target"], "w"), indent=1)
+                        print(f"[{time.strftime('%H:%M:%S')}] presentmon hint '{presentmon_hint}' never "
+                              f"matched a running process within {PRESENTMON_HINT_WINDOW_S // 60} min of "
+                              "the session starting -- giving up")
                 wifi = tail_row(files["wifi"], 10)
                 net = tail_row(files["net"], 30)
                 vrapi = vrapi_tail(files["logcat"])
@@ -558,6 +698,15 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd"):
             current["end_dev_s"] = clock["cell_end_dev_s"]
         if segments:
             write_session(files["session"], stack, segments, off)
+        if not presentmon_target_found and (presentmon_target or presentmon_hint):
+            # Written even on failure so results()/the wizard can tell "never found" apart from "no
+            # target was ever requested" (file absent) -- the former is a graceful-failure note, the
+            # latter is the ordinary system-wide-guess path. Reached here (rather than the loop's own
+            # deadline check) when the session ended before an exact target ever showed up, or before a
+            # hint's resolution window elapsed.
+            json.dump({"process": None, "pid": None, "hint": presentmon_hint, "searching": False,
+                      "found_at": None, **({"target": presentmon_target} if presentmon_target else {})},
+                      open(files["presentmon_target"], "w"), indent=1)
         json.dump(clock, open(os.path.join(run_dir, "clock.json"), "w"), indent=1)
         if stopped_gracefully and os.path.exists(stop_path):
             os.remove(stop_path)
@@ -890,6 +1039,10 @@ def ovr_window(csv_path, tail_s=170):
                 pass
         return out
     out = {"ovr_rows": len(win), "ovr_window_s": round((t_last - float(win[0]["Time Stamp"])) / 1000, 1)}
+    # app_frame_throttle is a per-row headroom PERCENTAGE (100 = fully unthrottled), not a duration --
+    # confirmed live, 2026-09-18: it read a constant 100.0 across an entire session with no throttling.
+    # summing it used to be labeled "_seconds" and produced a large, meaningless number; mean is the
+    # only aggregation that means anything for a percentage.
     for col, key, how in (("average_frame_rate", "ovr_avg_fps", "mean"),
                           ("average_frame_rate", "ovr_fps_min", "min"),
                           ("battery_temperature_celcius", "ovr_battery_temp_c", "mean"),
@@ -900,7 +1053,7 @@ def ovr_window(csv_path, tail_s=170):
                           ("stale_frames_consecutive", "ovr_max_consecutive_stale", "max"),
                           ("max_repeated_frames", "ovr_max_repeated_frames", "max"),
                           ("skipped_frames", "ovr_skipped_frames", "max"),
-                          ("app_frame_throttle", "ovr_throttle_seconds", "sum")):
+                          ("app_frame_throttle", "ovr_throttle_pct_mean", "mean")):
         v = vals(col)
         if not v:
             continue
@@ -1090,15 +1243,56 @@ def pc_summary(path):
     return out
 
 
+def _presentmon_fps_stats(rows, app_col, ms_col, process_name):
+    fps = []
+    for r in rows:
+        if r.get(app_col) != process_name:
+            continue
+        try:
+            ms = float(r[ms_col])
+            if ms > 0:
+                fps.append(1000.0 / ms)
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not fps:
+        return None
+    s = sorted(fps)
+    p1low = s[max(0, int(len(s) * 0.01) - 1)]
+    return {"pc_game_process": process_name, "pc_game_frame_count": len(fps),
+            "pc_game_fps_mean": round(sum(fps) / len(fps), 2), "pc_game_fps_min": round(min(fps), 2),
+            "pc_game_fps_1pct_low": round(p1low, 2)}
+
+
 def presentmon_reduce(path, exclude_procs=("VirtualDesktop.Streamer", "svchost", "dwm", "explorer",
-                                            "oculus", "OVRServer")):
-    """Reduce a PresentMon capture (system-wide, so it needs no game process name up front) into the PC
-    game's own present-rate stats -- the one layer findings.md calls out as invisible to every other
-    sampler here (the headset/OVR telemetry only ever sees the HEADSET compositor's frame rate). Column
-    names vary across PresentMon versions, so this reads whichever known variant is present rather than
-    assuming one schema. Picks the process with the most in-window rows, excluding the streamer/OS
-    processes, as 'the game' -- same dedup strategy as vr_api_reduce's pid selection, for the same reason:
-    more than one process can be presenting frames in the window."""
+                                            "oculus", "OVRServer"), session=None, off=0.0,
+                      target_process=None):
+    """Reduce a PresentMon capture into the PC game's own present-rate stats -- the one layer
+    findings.md calls out as invisible to every other sampler here (the headset/OVR telemetry only ever
+    sees the HEADSET compositor's frame rate). Column names vary across PresentMon versions, so this
+    reads whichever known variant is present rather than assuming one schema.
+
+    `target_process` (an exact image name, e.g. "hlvr.exe") comes from a run whose PresentMon capture
+    was launched with --process_name -- see monitor()'s presentmon_target/presentmon_hint handling and
+    wizard.py's ask_presentmon_hint(). When given, this is unambiguous: just report that process's
+    frames, or a clear note if it never presented any (didn't launch, crashed, or wasn't actually the
+    one rendering). No target given falls back to
+    guessing, which has two known failure modes handled explicitly rather than silently producing a
+    misleading number:
+    1. Without windowing, frames presented before the game started or after it closed (menu, loading,
+       the desktop) get mixed into "the game"'s stats. `session`/`off` (session.json's segments + the
+       clock offset, same convention as decay_events()) restrict the analysis to the streaming app's own
+       active window(s), when the capture has absolute per-row timestamps (Sample-GameFPS.ps1 passes
+       --date_time for exactly this reason). Without --date_time in the capture, or without a session,
+       this falls back to reducing the whole file unwindowed, same as before.
+    2. Even windowed, "pick whichever process has the most frames" is confirmed wrong (2026-09-18)
+       whenever something else on the desktop presents at a higher, steadier rate than a stalling game
+       -- a browser/terminal at a solid 60fps outscores a game stuttering at 20fps, picking exactly the
+       wrong process at exactly the moment the stall is worth seeing. This guess is a convenience for
+       Quick Test's zero-setup path, not something to trust for a real investigation -- use
+       target_process whenever the reading matters. PresentMon also needs elevated privilege to name
+       short-lived or other-account processes at all; without it they're lumped under the literal string
+       "<unknown>", excluded from guessing like the streamer/OS names since it could be several
+       unrelated processes, not one."""
     if not os.path.exists(path):
         return {}
     try:
@@ -1116,32 +1310,56 @@ def presentmon_reduce(path, exclude_procs=("VirtualDesktop.Streamer", "svchost",
     if not app_col or not ms_col:
         return {"pc_game_fps_note": f"unrecognized PresentMon CSV schema ({sorted(hdr)[:6]}...)"}
 
+    ts_col = pick("CPUStartDateTime", "TimeInDateTime")
+    segs = (session or {}).get("segments")
+    windows = None
+    if ts_col and segs:
+        windows = [(s["start_dev_s"] - off, s.get("end_dev_s", time.time() + off) - off) for s in segs]
+
+    def row_epoch(raw):
+        # "2026-9-18 8:57:43.386354900" -- PresentMon's --date_time format: no leading zeros, up to
+        # nanosecond precision. datetime.strptime chokes on both, so this is parsed by hand.
+        import datetime as _dt
+        try:
+            date_part, time_part = raw.split(" ", 1)
+            y, mo, d = (int(x) for x in date_part.split("-"))
+            h, mi, sec = time_part.split(":")
+            whole, _sep, frac = sec.partition(".")
+            micros = int((frac + "000000")[:6]) if frac else 0
+            return _dt.datetime(y, mo, d, int(h), int(mi), int(whole), micros).timestamp()
+        except (ValueError, IndexError):
+            return None
+
+    if windows:
+        kept = [r for r in rows if r.get(ts_col) and
+                (lambda t: t is not None and any(w0 <= t <= w1 for w0, w1 in windows))(row_epoch(r[ts_col]))]
+        if kept:
+            rows = kept
+
+    if target_process:
+        stats = _presentmon_fps_stats(rows, app_col, ms_col, target_process)
+        if stats:
+            return stats
+        return {"pc_game_fps_note": f"no frames captured from '{target_process}' -- it never presented "
+                "a frame in this session (didn't launch, crashed, or wasn't the one actually rendering)"}
+
     def excluded(name):
-        low = (name or "").lower()
+        if not name or name == "<unknown>":
+            return True
+        low = name.lower()
         return any(x.lower() in low for x in exclude_procs)
 
     from collections import Counter
-    counts = Counter(r[app_col] for r in rows if r.get(app_col) and not excluded(r[app_col]))
+    counts = Counter(r[app_col] for r in rows if not excluded(r.get(app_col)))
     if not counts:
+        unknown_frames = sum(1 for r in rows if r.get(app_col) == "<unknown>")
+        if unknown_frames:
+            return {"pc_game_fps_note": f"{unknown_frames} frame(s) captured but PresentMon couldn't "
+                    "name the process (it needs admin privilege for short-lived/other-account "
+                    "processes) -- re-run elevated for a real reading"}
         return {}
     game = counts.most_common(1)[0][0]
-    fps = []
-    for r in rows:
-        if r.get(app_col) != game:
-            continue
-        try:
-            ms = float(r[ms_col])
-            if ms > 0:
-                fps.append(1000.0 / ms)
-        except (KeyError, TypeError, ValueError):
-            continue
-    if not fps:
-        return {}
-    s = sorted(fps)
-    p1low = s[max(0, int(len(s) * 0.01) - 1)]
-    return {"pc_game_process": game, "pc_game_frame_count": len(fps),
-            "pc_game_fps_mean": round(sum(fps) / len(fps), 2), "pc_game_fps_min": round(min(fps), 2),
-            "pc_game_fps_1pct_low": round(p1low, 2)}
+    return _presentmon_fps_stats(rows, app_col, ms_col, game) or {}
 
 
 def decay_events(run_dir, frac=0.4, min_s=20.0, gap_s=10.0, out_tsv=None, session=None, off=0.0):
@@ -1543,9 +1761,10 @@ def results(run_id, overlay_path=None):
     if overlay_path and os.path.exists(overlay_path):
         overlay = json.load(open(overlay_path))
 
-    w = json.loads(_run([sys.executable, os.path.join(qsite.TOOLS_DIR, "analyze.py"),
-                         "cell", os.path.join(BASE, "runs"), run_id,
-                         "--quest-ip", QUEST_IP, "--window", "30,150"]))
+    # Direct call, not a sys.executable subprocess: the latter breaks under a frozen/bundled build the
+    # same way dashboard.py's old subprocess launch did (see its make_server() docstring) -- there is
+    # no plain python.exe to hand a sibling .py file to when sys.executable is the bundled exe itself.
+    w = analyze.reduce_cell(os.path.join(BASE, "runs"), run_id, quest_ip=QUEST_IP, window="30,150")
 
     # wifi counter deltas (MAC layer, headset TX direction)
     rows = read_tsv(os.path.join(run_dir, "quest_wifi_samples.tsv"))
@@ -1559,9 +1778,10 @@ def results(run_id, overlay_path=None):
     retry = round(tr / tx * 100, 3) if tx else None
     lost = round(tl / tx * 100, 3) if tx else None
 
-    # ovr metrics (last 170 s of newest CSV) - VD only; stale_frame_count is a PER-SECOND bucket.
-    # The OVR service writes one CSV per session, so a cell with OVR logging disabled would otherwise
-    # silently inherit the previous session's numbers: gate on the file's device mtime vs the cell window.
+    # ovr metrics (newest CSV, windowed to the actual cell duration) - VD only; stale_frame_count is
+    # a PER-SECOND bucket. The OVR service writes one CSV per session, so a cell with OVR logging
+    # disabled would otherwise silently inherit the previous session's numbers: gate on the file's
+    # device mtime vs the cell window.
     clock_file = os.path.join(run_dir, "clock.json")
     clock = json.load(open(clock_file)) if os.path.exists(clock_file) else {}
     start_dev = clock.get("cell_start_dev_s")
@@ -1584,7 +1804,18 @@ def results(run_id, overlay_path=None):
         except ValueError:
             ovr["ovr_stale"] = None
     if newest and fresh and os.path.exists(ovr_csv):
-        ovr.update(ovr_window(ovr_csv, tail_s=170))
+        # 170s used to be a hardcoded constant here, sized for the old fixed-duration `capture()`
+        # cells (150s + margin). `monitor()` sessions run open-ended and are routinely much longer --
+        # a 5-minute play session silently had its first ~2 minutes excluded from every OVR-derived
+        # stat (avg fps, stale-frame counts, GPU/CPU util, ...) with no indication that had happened.
+        # Confirmed live, 2026-09-18: a real stutter (12 consecutive stale frames) at the 2:43 mark of
+        # a ~5 min session was completely absent from results.json because it fell outside the fixed
+        # window, while a smaller one at 7:09 was the only one visible -- looking like an isolated
+        # blip instead of the second of two. Size the window to the actual cell duration instead, with
+        # 170s as a floor (not a ceiling) so short cells keep their old behavior unchanged.
+        cell_end = clock.get("cell_end_dev_s")
+        tail_s = max(170, (cell_end - start_dev) + 15) if (cell_end and start_dev) else 170
+        ovr.update(ovr_window(ovr_csv, tail_s=tail_s))
 
     res = {
         "wire_tx_mbps": w.get("wire_tx_mbps"), "wire_rx_mbps": w.get("wire_rx_mbps"),
@@ -1618,7 +1849,26 @@ def results(run_id, overlay_path=None):
                          out_tsv=os.path.join(run_dir, "controller_events.tsv")))
     res.update(codec_events(run_dir, ser, since_dev_s=vr_start,
                             out_tsv=os.path.join(run_dir, "codec_events.tsv")))
-    res.update(presentmon_reduce(os.path.join(run_dir, "presentmon.csv")))
+    target_path = os.path.join(run_dir, "presentmon_target.json")
+    presentmon_target, presentmon_gave_up = None, None
+    if os.path.exists(target_path):
+        try:
+            info = json.load(open(target_path))
+            presentmon_target = info.get("process")
+            if presentmon_target is None:
+                presentmon_gave_up = info.get("target") or info.get("hint") or "the requested game"
+        except (OSError, ValueError):
+            pass
+    if presentmon_gave_up:
+        # A target/hint was explicitly requested and never resolved -- report that plainly instead of
+        # silently falling back to presentmon_reduce()'s ambiguous "most frames" guess, which is exactly
+        # the unreliable path an explicit target/hint exists to avoid.
+        res["pc_game_fps_note"] = (f"never found a process matching '{presentmon_gave_up}' during this "
+                                    "session -- no PC game-fps data captured")
+    else:
+        res.update(presentmon_reduce(os.path.join(run_dir, "presentmon.csv"),
+                                     session=sess, off=(clock.get("offset_s") or 0.0),
+                                     target_process=presentmon_target))
     if clock:
         res["quest_clock_offset_s"] = clock.get("offset_s")
         res["quest_uptime_s"] = clock.get("dev_uptime_s")

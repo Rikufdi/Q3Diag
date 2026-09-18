@@ -24,9 +24,20 @@ import os
 import shutil
 import sys
 
-TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_BASE_DIR = os.path.dirname(TOOLS_DIR)
-CONFIG_PATH = os.environ.get("QUEST3_SITE") or os.path.join(TOOLS_DIR, "site.json")
+# Frozen (PyInstaller) builds extract their bundled files -- this module, the .ps1 samplers,
+# site.example.json, a vendored adb.exe -- to sys._MEIPASS, not to wherever this .py file's own
+# on-disk location would suggest. __file__ inside a frozen build doesn't reliably point there, so
+# detect frozen mode explicitly rather than relying on it.
+FROZEN = bool(getattr(sys, "frozen", False))
+TOOLS_DIR = sys._MEIPASS if FROZEN else os.path.dirname(os.path.abspath(__file__))
+# The exe's own directory, not TOOLS_DIR: for a --onefile build, sys._MEIPASS is a temp extraction
+# directory that gets deleted when the process exits, so anything the app needs to persist across
+# runs (site.json, and runs/baseline/etc under base_dir) has to live next to the exe instead, or the
+# wizard's own "discover the headset's IP once, remember it" feature would silently lose that memory
+# on every single run.
+PERSIST_DIR = os.path.dirname(sys.executable) if FROZEN else TOOLS_DIR
+DEFAULT_BASE_DIR = os.path.dirname(PERSIST_DIR) if not FROZEN else PERSIST_DIR
+CONFIG_PATH = os.environ.get("QUEST3_SITE") or os.path.join(PERSIST_DIR, "site.json")
 EXAMPLE_PATH = os.path.join(TOOLS_DIR, "site.example.json")
 
 # Keys that name an executable or install path. `path()` resolves these.
@@ -36,6 +47,7 @@ TOOL_KEYS = ("adb", "python", "tshark", "pktmon", "ffprobe",
 # Discovery order per key, used when the profile leaves the key empty.
 _AUTO = {
     "adb": (
+        os.path.join(TOOLS_DIR, "adb.exe"),  # bundled with a packaged release -- see release/build_release.py
         os.path.join(os.environ.get("LOCALAPPDATA", ""),
                      r"Microsoft\WinGet\Packages\Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe"
                      r"\platform-tools\adb.exe"),
@@ -159,3 +171,19 @@ def path(key, fallbacks=()):
     raise SystemExit(
         f"could not locate '{key}'. Set it in {CONFIG_PATH} "
         f"(copy tools/site.example.json to tools/site.json) or export QUEST3_{key.upper()}.")
+
+
+def presentmon_exe():
+    """Optional, so unlike path() this returns None instead of raising when there's nothing to find --
+    cell.py's monitor() already treats a missing PresentMon as "skip this sampler", not an error, and
+    prints a message telling you how to add it. Checks site.json/QUEST3_PRESENTMON_EXE first (a real
+    install always wins), then a copy placed as PresentMon.exe next to this module -- deliberately not
+    bundled by release/build_release.py (see its module docstring for why), but auto-detected if you
+    drop one in yourself, so that needs no site.json edit either."""
+    configured = get("presentmon_exe")
+    if configured:
+        return configured
+    bundled = os.path.join(TOOLS_DIR, "PresentMon.exe")
+    return bundled if exists(bundled) else None
+
+

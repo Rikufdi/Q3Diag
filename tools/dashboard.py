@@ -116,6 +116,12 @@ def status(run_id):
             out["fingerprint"] = json.load(open(fp_path))
         except (OSError, ValueError):
             pass
+    pm_path = os.path.join(run_dir, "presentmon_target.json")
+    if os.path.exists(pm_path):
+        try:
+            out["presentmon_target"] = json.load(open(pm_path))
+        except (OSError, ValueError):
+            pass
     return out
 
 
@@ -191,7 +197,16 @@ const TILES = [
     v => v, v => v > 0 ? "warn" : ""],
   ["vrapi", "Compositor fps / stale", "Frames-per-second the headset's compositor is actually rendering, and how many frames were 'stale' (repeated because a new one didn't arrive in time) in the last second.",
     v => v, () => ""],
+  ["presentmon_target_display", "Game exe found", "Which PC process PresentMon locked onto for game frame-rate capture, confirmed by name and PID (not guessed) -- see the game-name prompt at session start.",
+    v => v, v => (typeof v === "string" && v.startsWith("not found")) ? "warn" : ""],
 ];
+
+function presentmonTargetDisplay(pm) {
+  if (!pm) return undefined;
+  if (pm.pid) return pm.process + " (PID " + pm.pid + ")";
+  if (pm.searching) return "searching for '" + (pm.hint || pm.target || "") + "'...";
+  return "not found: '" + (pm.hint || pm.target || "") + "'";
+}
 
 function fmtClass(text) {
   const s = String(text);
@@ -201,6 +216,7 @@ function fmtClass(text) {
 }
 
 function render(d) {
+  d.presentmon_target_display = presentmonTargetDisplay(d.presentmon_target);
   document.getElementById("run_id").textContent = d.run_id;
   document.getElementById("updated_at").textContent = d.updated_at + (d.exists ? "" : "  (run not found yet)");
   const banner = document.getElementById("banner");
@@ -284,15 +300,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
 
+def make_server(run_id, port):
+    """Build (but don't start) a dashboard HTTP server for run_id. Split out from __main__ so a caller
+    that already has a Python interpreter running -- wizard.py, importing this module directly -- can
+    serve_forever() it on a background thread instead of spawning `python dashboard.py` as a
+    subprocess. That subprocess path breaks under a frozen/bundled build: sys.executable there is the
+    bundled exe itself, not a plain python.exe that can be handed a sibling .py file to run."""
+    global RUN_ID
+    RUN_ID = run_id
+    return http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
-    RUN_ID = sys.argv[1]
     port = int(qsite.get("dashboard_port", 8765))
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    srv = make_server(sys.argv[1], port)
     print(f"dashboard: http://127.0.0.1:{port}/  (run_id={RUN_ID}, Ctrl+C to stop)")
     try:
         srv.serve_forever()
