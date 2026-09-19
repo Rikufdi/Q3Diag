@@ -297,6 +297,56 @@ def _alert_headset(ser, degrade):
     _adb("-s", ser, "shell", cmd)
 
 
+# Network identifiers that must never reach a published artifact. The Quest's controller link always
+# sits on 192.168.49.0/24 -- identical on every unit -- so it is excluded here as well as in the
+# sampler, rather than turning a device constant into noise.
+_SENSITIVE_MAC_RE = re.compile(rb"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b")
+_SENSITIVE_IP_RE = re.compile(rb"\b(?!192\.168\.49\.)(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3})\b")
+_SENSITIVE_SSID_RE = re.compile(rb'(SSID:\s*")([^"]+)(")')
+
+
+def redact_artifacts(run_dir, names=("ping_samples.txt", "cm_wifi_snapshots.txt")):
+    """Strip network identifiers from the raw-text artifacts of a run, in place. Returns what changed.
+
+    The headset sampler redacts as it writes (Protect-Identifiers in Sample-Quest.ps1), but two paths
+    bypass it: ping_samples.txt comes from a plain `ping` redirect issued by this process, so it carries
+    the headset's LAN address on every line, and a hard-killed session (taskkill, hub stop) never runs
+    the sampler's own exit path. This therefore runs at the end of every session *and* at the start of
+    results(), so whichever happens first, an artifact that reaches a repository or a bug report has
+    already been through it.
+
+    Ordinals (mac1, ip1) rather than a hash, matching the sampler: a MAC carries only 48 bits, so a hash
+    would be trivially reversible, while ordinals keep the relational structure later analysis needs
+    ("the same AP as the previous sample")."""
+    macs, ips, ssids = {}, {}, {}
+
+    def sub_mac(m):
+        macs.setdefault(m.group(0).lower(), b"mac%d" % (len(macs) + 1))
+        return macs[m.group(0).lower()]
+
+    def sub_ip(m):
+        ips.setdefault(m.group(0), b"ip%d" % (len(ips) + 1))
+        return ips[m.group(0)]
+
+    def sub_ssid(m):
+        ssids.setdefault(m.group(2), b"ssid%d" % (len(ssids) + 1))
+        return m.group(1) + ssids[m.group(2)] + m.group(3)
+
+    changed = []
+    for name in names:
+        path = os.path.join(run_dir, name)
+        if not os.path.exists(path):
+            continue
+        with open(path, "rb") as f:
+            data = f.read()
+        out = _SENSITIVE_IP_RE.sub(sub_ip, _SENSITIVE_MAC_RE.sub(sub_mac, _SENSITIVE_SSID_RE.sub(sub_ssid, data)))
+        if out != data:
+            with open(path, "wb") as f:
+                f.write(out)
+            changed.append(name)
+    return changed
+
+
 def _parse_wifi_status(text):
     out = {}
     for key, pat in (("tx_success", r"successfulTxPackets:\s*(\d+)"), ("tx_retries", r"retriedTxPackets:\s*(\d+)"),
@@ -767,6 +817,10 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
                 p.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 p.kill()
+        # Samplers are dead, so nothing is appending any more: scrub the raw-text artifacts here as
+        # well as at write time in the sampler. This is the path that also covers ping_samples.txt
+        # (written by our own redirect) and any run the sampler did not exit cleanly from.
+        redact_artifacts(run_dir)
         clock["cell_start_dev_s"] = round(start_dev, 3)
         clock["cell_end_dev_s"] = round(time.time() + off, 3)
         if current is not None and "end_dev_s" not in current:
@@ -2173,6 +2227,9 @@ def watch(run_id, interval=30, drop_frac=0.6, heartbeat_min=5, beep=False, heads
 
 def results(run_id, overlay_path=None):
     run_dir = os.path.join(BASE, "runs", run_id)
+    # Before anything else, and before adb: a run whose session was killed hard still gets its raw
+    # artifacts scrubbed here, even when the headset is unreachable.
+    redact_artifacts(run_dir)
     ser = adb_serial()
     overlay = {}
     if overlay_path and os.path.exists(overlay_path):

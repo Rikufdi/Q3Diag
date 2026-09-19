@@ -163,10 +163,14 @@ $hot = $temps | Sort-Object c -Descending | Select-Object -First 12
 $lines = @()
 $lines += '# Quest probe summary'
 $lines += ''
-$lines += "- captured: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')   serial: $serial"
+# The adb endpoint is <ip>:<port> and the ip is the operator's own LAN address; publish the port only.
+# ro.serialno is the headset's own serial number, which is device-identifying: keep the field, drop the
+# value. Raw outputs (unredacted) stay under OutDir\raw, which .gitignore keeps out of the repository.
+$serialPort = ($serial -split ':')[-1]
+$lines += "- captured: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')   serial: <quest-ip>:$serialPort"
 $lines += "- model: $(Prop 'ro.product.model')   horizon: $(Prop 'ro.build.display.id')   android: $(Prop 'ro.build.version.release')   kernel: $kernel"
 $lines += "- build: $(Prop 'ro.build.fingerprint')"
-$lines += "- soc: $(Prop 'ro.soc.model')   abi: $(Prop 'ro.product.cpu.abi')   serial-props: $(Prop 'ro.serialno')"
+$lines += "- soc: $(Prop 'ro.soc.model')   abi: $(Prop 'ro.product.cpu.abi')   serial-props: <headset-serial>"
 $lines += "- vr: vrapi=$(Prop 'ro.vrapi.version') hw=$(Prop 'ro.vr.hardware') ocms=$(Prop 'ro.ocms.version')"
 $lines += "- mem: $((Raw 'meminfo') -split "`n" | Where-Object { $_ -match 'MemTotal|MemAvailable' } | ForEach-Object { $_.Trim() })"
 $lines += ''

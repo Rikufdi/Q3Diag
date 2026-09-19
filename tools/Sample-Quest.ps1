@@ -190,6 +190,49 @@ function Sample-Sf([string]$layer, [ref]$prevMax) {
     return @{ nonzero_rows = $nonzero; max_actual_present_ns = $maxActual; frames_since_prev = $framesSince }
 }
 
+# ---- redaction -------------------------------------------------------------
+# These captures can end up in a published run directory, and the raw device text carries network
+# identifiers: SSIDs, interface MAC addresses and the operator's LAN addressing. Replace them with
+# per-file ordinals at the moment of writing, so nothing identifying is ever on disk to begin with.
+#
+# Ordinals rather than a hash: a MAC has only 48 bits of entropy, so a hash is trivially reversible,
+# whereas mac1/mac2 preserves the relational structure an analysis needs ("the same AP as the previous
+# sample"). The Quest's controller/P2P link always lives on 192.168.49.0/24 -- identical on every
+# unit -- so it is deliberately left intact rather than turning a device constant into noise.
+$script:RedactMac = @{}
+$script:RedactIp = @{}
+$script:RedactSsid = @{}
+function Protect-Identifiers([string]$Text, [string]$Ssid) {
+    if (-not $Text) { return $Text }
+    $t = [regex]::Replace($Text, '\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b', {
+        param($m)
+        $k = $m.Value.ToLower()
+        if (-not $script:RedactMac.ContainsKey($k)) { $script:RedactMac[$k] = 'mac' + ($script:RedactMac.Count + 1) }
+        $script:RedactMac[$k]
+    })
+    $t = [regex]::Replace($t, '\b(?!192\.168\.49\.)(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3})\b', {
+        param($m)
+        $k = $m.Value
+        if (-not $script:RedactIp.ContainsKey($k)) { $script:RedactIp[$k] = 'ip' + ($script:RedactIp.Count + 1) }
+        $script:RedactIp[$k]
+    })
+    # Quoted form first, then any remaining literal mention of the connected SSID (the dumps quote it
+    # outside an SSID: field, e.g. onConcurrencyModeChanged). Order matters: if the earlier pass has
+    # already replaced the quoted occurrence with a label, the literal pass finds nothing to remap and
+    # the same network keeps one label instead of acquiring a second.
+    $t = [regex]::Replace($t, 'SSID:\s*"([^"]+)"', {
+        param($m)
+        $k = $m.Groups[1].Value
+        if (-not $script:RedactSsid.ContainsKey($k)) { $script:RedactSsid[$k] = 'ssid' + ($script:RedactSsid.Count + 1) }
+        'SSID: "' + $script:RedactSsid[$k] + '"'
+    })
+    if ($Ssid) {
+        if (-not $script:RedactSsid.ContainsKey($Ssid)) { $script:RedactSsid[$Ssid] = 'ssid' + ($script:RedactSsid.Count + 1) }
+        $t = $t.Replace($Ssid, $script:RedactSsid[$Ssid])
+    }
+    return $t
+}
+
 # ---- headers + main loop ---------------------------------------------------
 function Ensure-Header([string]$file, [string]$header) {
     if (-not (Test-Path $file)) { Set-Content -Path $file -Value $header -Encoding UTF8 }
@@ -198,6 +241,13 @@ Ensure-Header $OutFile "timestamp`trssi`tlink_mbps`ttx_link_mbps`trx_link_mbps`t
 if ($NetFile) { Ensure-Header $NetFile "timestamp`twlan0_rx_bytes`twlan0_tx_bytes`twlan0_rx_errs`twlan0_rx_drop`twlan0_tx_errs`twlan0_tx_drop`ttcp_in_segs`ttcp_out_segs`ttcp_retrans_segs`ttcp_in_errs`ttcp_out_rsts`tp2p0_rx_bytes`tp2p0_tx_bytes`tp2p0_rx_errs`tp2p0_rx_drop`tp2p0_tx_errs`tp2p0_tx_drop" }
 if ($EnvFile) { Ensure-Header $EnvFile "timestamp`tsta_rssi`tsta_bw_mhz`tsta_tx_power_dbm`tgpu_busy_pct`tsoc_usr_c`tgpuss_max_c`tcpuss_max_c`tbatt_virt_c`thmd_state" }
 if ($SfFile)  { Ensure-Header $SfFile  "timestamp`tnonzero_rows`tmax_actual_present_ns`tframes_since_prev" }
+
+# The connected SSID, read once, so redaction can replace that exact string wherever the dumps carry it
+# (onConcurrencyModeChanged and friends quote it outside any SSID: field).
+$Ssid = ''
+$st = Sh 'cmd wifi status'
+$mm = [regex]::Match($st, 'SSID:\s*"([^"]+)"')
+if ($mm.Success) { $Ssid = $mm.Groups[1].Value }
 
 $prevSf = 0
 $deadline = (Get-Date).AddSeconds($Seconds)
@@ -229,7 +279,7 @@ while ((Get-Date) -lt $deadline) {
     }
     if ($CmFile -and $now -ge $nextCm) {
         Add-Content -Path $CmFile -Encoding UTF8 -Value "== $ts =="
-        Add-Content -Path $CmFile -Encoding UTF8 -Value (Sh 'dumpsys cm_wifi')
+        Add-Content -Path $CmFile -Encoding UTF8 -Value (Protect-Identifiers (Sh 'dumpsys cm_wifi') $Ssid)
         $nextCm = $now.AddSeconds($CmIntervalSec)
     }
     Start-Sleep -Milliseconds 250
