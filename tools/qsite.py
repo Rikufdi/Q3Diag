@@ -80,6 +80,7 @@ _SCRIPTS = {
     "pc_sampler": "Sample-PC.ps1",
     "quest_probe": "Quest-Probe.ps1",
     "game_fps_sampler": "Sample-GameFPS.ps1",
+    "trace_session": "Trace-Session.ps1",
 }
 
 DEFAULTS = {

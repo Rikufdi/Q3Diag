@@ -28,7 +28,8 @@ Per-cell device-side instrumentation (all optional files, written into runs/<run
   quest_env_samples.tsv   OculusWifi STA state + thermals + GPU busy
   sf_latency_samples.tsv  SurfaceFlinger --latency advance of the active panel layer
   ping_samples.txt        PC->headset ICMP at 1 Hz (under-load latency/jitter, previously missing)
-  vr_api_logcat.txt       logcat -s VrApi: per-second FPS/Stale/TW/App/CFL/ICFL/PoseAge (any stack)
+  vr_api_logcat.txt       logcat -s VrApi QC2Comp: per-second FPS/Stale/TW/App/CFL/ICFL/PoseAge (any
+                          stack), plus the codec process's decoder stats (output fps, Mbps, queue lag)
   clock.json              headset<->PC clock offset + device uptime at capture time
 """
 import sys, os, re, time, json, csv, socket, subprocess
@@ -49,6 +50,9 @@ OVR_DIR = qsite.get("ovr_metrics_dir")
 ID_COLS = ["run_id", "stack", "codec", "bitrate_mbps", "content", "band"]
 MEAS_COLS = [
     "wire_tx_mbps", "wire_rx_mbps", "wire_pkts_per_s", "retry_rate_pct", "lost_rate_pct",
+    "retry_rate_p90_pct", "retry_rate_max_pct", "retry_bursts", "retry_bursts_pct",
+    "retry_lost_packets", "retry_burst_lost_packets", "retry_burst_rssi_dbm_min",
+    "retry_burst_link_mbps_min", "retry_counter_resets",
     "quest_tx_packets_delta", "quest_retried_tx_delta", "quest_lost_tx_delta", "quest_rx_packets_delta",
     "overlay_fps", "overlay_latency_total_ms", "overlay_latency_game_ms", "overlay_latency_encode_ms",
     "overlay_latency_network_ms", "overlay_latency_decode_ms", "overlay_bitrate_mbps", "overlay_wifi_mbps",
@@ -64,6 +68,10 @@ MEAS_COLS = [
     "vr_api_stale_max_consecutive", "vr_api_tw_ms_mean", "vr_api_app_ms_mean",
     "vr_api_cfl_ms_mean", "vr_api_icfl_p95_ms_mean", "vr_api_icfl_p95_ms_max",
     "vr_api_pose_age_p95_max", "vr_api_temp_c_max", "vr_api_gpu_pct_mean",
+    "codec_stream_instance", "codec_stream_samples", "codec_stream_fps_mean", "codec_stream_fps_min",
+    "codec_stream_seconds_below_60fps",
+    "codec_stream_mbps_mean", "codec_stream_mbps_min", "codec_stream_lag_max",
+    "codec_stream_workrate_min", "codec_stream_other_instances",
     "tcp_retrans_segs", "tcp_in_errs", "wlan0_rx_errs", "wlan0_rx_drop", "wlan0_tx_errs", "wlan0_tx_drop",
     "p2p0_rx_mbps", "p2p0_tx_mbps", "p2p0_rx_errs", "p2p0_rx_drop", "p2p0_tx_errs", "p2p0_tx_drop",
     "cm_snapshots", "cm_events_session", "cm_ctrl_last_left", "cm_ctrl_last_right",
@@ -73,6 +81,13 @@ MEAS_COLS = [
     "cm_map_share_sends", "cm_map_share_kib", "cm_map_share_gap_median_s", "cm_map_share_gap_max_s",
     "pc_samples", "pc_enc_util_mean", "pc_enc_util_min", "pc_enc_util_max", "pc_gpu_util_mean",
     "pc_tcp_retrans_mean", "pc_tcp_retrans_max_per_s", "pc_tcp_sent_mean_per_s",
+    "pc_dpc_pct_mean", "pc_dpc_pct_max", "pc_isr_pct_mean", "pc_isr_pct_max",
+    "pc_mem_avail_min_mb", "pc_mem_pages_max_per_s", "pc_page_faults_max_per_s",
+    "pc_game_prio", "pc_game_cpu_pct_mean", "pc_game_cpu_pct_min", "pc_game_ws_mb_mean",
+    "pc_game_pf_max_per_s", "pc_game_threads_mean", "pc_game_thr_wait_at_min_cpu",
+    "pc_top_procs_at_min_game_cpu",
+    "pc_streamer_cpu_pct_mean", "pc_streamer_cpu_pct_max", "pc_streamer_cpu_pct_min",
+    "pc_vr_cpu_pct_mean", "pc_vr_cpu_pct_max", "pc_vr_cpu_pct_min", "pc_vr_ws_mb_mean",
     "decay_rate_median_mbps", "decay_episodes", "decay_first_start_min", "decay_total_min", "decay_min_mbps",
     "decay_episode_enc_util_mean", "decay_episode_retrans_max", "decay_baseline_enc_util_mean",
     "decay_baseline_retrans_mean",
@@ -93,9 +108,12 @@ MEAS_COLS = [
 # moves even on a small baseline value, abs catches small-ratio moves that still matter in absolute terms
 # (e.g. +4 degC). ratio_thresh=999 disables the ratio check for counters that scale with session length.
 FINGERPRINT_KEYS = [
-    "retry_rate_pct", "lost_rate_pct", "ping_rtt_p50_ms", "ping_rtt_p95_ms", "ping_loss_pct",
+    "retry_rate_pct", "retry_rate_p90_pct", "retry_rate_max_pct", "retry_bursts",
+    "retry_bursts_pct", "retry_lost_packets", "retry_burst_lost_packets",
+    "retry_burst_rssi_dbm_min", "retry_burst_link_mbps_min", "lost_rate_pct", "ping_rtt_p50_ms", "ping_rtt_p95_ms", "ping_loss_pct",
     "vr_api_fps_mean", "vr_api_seconds_below_85fps", "vr_api_stale_per_min",
     "pc_enc_util_mean", "pc_tcp_retrans_mean", "decay_episodes", "decay_total_min",
+    "pc_dpc_pct_max", "pc_isr_pct_max",
     "decay_rate_median_mbps", "env_soc_max_c", "env_gpu_max_c", "env_sta_tx_power_dbm",
     "wlan0_rx_errs", "wlan0_rx_drop", "tcp_retrans_segs", "pc_game_fps_mean", "pc_game_fps_1pct_low",
 ]
@@ -110,6 +128,14 @@ FINGERPRINT_RULES = {
     "vr_api_stale_per_min":        ("worse_high", 2.0,   3.0),
     "pc_enc_util_mean":             ("worse_low",  0.7,   3.0),
     "pc_tcp_retrans_mean":          ("worse_high", 3.0,   2.0),
+    # Worst single-core DPC/ISR% seen in the run. Trips on a clear rise (≥2 points AND ≥2x baseline):
+    # a driver that starts monopolising a core for ~100 ms stretches is exactly what produces
+    # PC-side frame stalls with an idle GPU.
+    "pc_dpc_pct_max":               ("worse_high", 2.0,   2.0),
+    # Worst per-interval Wi-Fi retry rate. Deliberately the MAX, not the run mean: the mean sits at
+    # ~2 % in runs whose samples peak at 76 %, and that averaging is what hid the real fault.
+    "retry_rate_max_pct":           ("worse_high", 2.0,   5.0),
+    "pc_isr_pct_max":               ("worse_high", 2.0,   2.0),
     "decay_episodes":               ("worse_high", 999.0, 0.5),
     "decay_total_min":              ("worse_high", 1.5,   1.0),
     "decay_rate_median_mbps":       ("worse_low",  0.85,  20.0),
@@ -145,7 +171,16 @@ def fingerprint(run_id, save_baseline=False, tag=None):
     res = json.load(open(res_path))
     settings = json.load(open(os.path.join(run_dir, "settings.json"))) if \
         os.path.exists(os.path.join(run_dir, "settings.json")) else {}
-    tag = tag or f"{settings.get('stack', 'na')}_{settings.get('codec', 'na')}_{settings.get('bitrate_mbps', 'na')}_{settings.get('band', 'na')}"
+    if not tag:
+        # Tag = the identity columns that define a configuration, taken in ID_COLS order (minus the
+        # run_id), so it cannot silently drift out of step with them again. `content` belongs in it: a
+        # motion run and a static run at the same stack/codec/bitrate/band are different workloads, and
+        # leaving it out made the fingerprint compare apples to oranges -- confirmed 2026-09-19, a
+        # motion run was diffed against a *static* baseline. Consequence of the change: old-format
+        # baseline files are no longer matched by name, so the first run on each configuration reports
+        # "no prior baseline" once and establishes a fresh one.
+        tag = "_".join(str(settings.get(k) if settings.get(k) is not None else "na")
+                       for k in ("stack", "codec", "bitrate_mbps", "content", "band", "bt"))
     tag = re.sub(r"[^A-Za-z0-9_.+-]", "_", str(tag))
     metrics = _fp_derive(res)
 
@@ -154,7 +189,8 @@ def fingerprint(run_id, save_baseline=False, tag=None):
     baseline_path = os.path.join(fp_dir, f"{tag}.json")
     diff_path = os.path.join(run_dir, "fingerprint_diff.json")
     fp = {"tag": tag, "run_id": run_id, "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-          "settings": {k: settings.get(k) for k in ("stack", "codec", "bitrate_mbps", "content", "band")},
+          "settings": {k: settings.get(k) for k in ("stack", "codec", "bitrate_mbps", "content",
+                                                    "band", "bt")},
           "metrics": metrics}
 
     if save_baseline or not os.path.exists(baseline_path):
@@ -401,13 +437,33 @@ _PRESENTMON_HINT_IGNORE = {
 }
 
 
+# Guard rails for _fuzzy_match_process()'s difflib fallback. Deliberately strict: failing to resolve
+# a hint is safe (the search keeps running, and a miss is reported by name at the end), whereas
+# resolving it to the WRONG process silently costs the run all of its PC frame data -- which is
+# exactly what happened on 2026-09-19 (see that function's docstring).
+PRESENTMON_HINT_MIN_LEN = 8      # shorter hints must match by substring, or not at all
+PRESENTMON_HINT_RATIO_CUTOFF = 0.75
+
+
 def _fuzzy_match_process(hint):
     """Resolve a free-text game-name hint (what a human actually types, e.g. "half life alyx") against
-    whatever's running on the PC right now, for monitor()'s presentmon_hint. A plain substring check
-    against the exe name (minus ".exe", spaces ignored) runs first since it's the common case and never
-    produces a surprising match; difflib's fuzzy ratio is the fallback for a looser guess (e.g. "hlvr"
-    for "hlvr.exe" already hits the substring path, but "halflifealyx" needs the ratio path against
-    "hlvr" to have any chance). Returns the exact image name (with ".exe") or None."""
+    whatever's running on the PC right now, for monitor()'s presentmon_hint. Returns the exact image
+    name (with ".exe") or None.
+
+    Both sides are flattened to letters+digits before any comparison, because the hint and the exe
+    name rarely share punctuation: a human types "angry birds", the file is
+    "angry-birds-vr-isle-of-pigs.exe".
+
+    A substring test on that flattened name runs first -- the common case, and it never surprises.
+
+    The difflib fallback is a last resort and is deliberately hard to trip. It used to be cutoff 0.45
+    over the *raw* names, which matched "angry" to **MacTray.exe**: a 5-character hint scores 0.50
+    against that unrelated 7-character name while scoring only 0.32 against the real, much longer
+    "angry-birds-vr-isle-of-pigs" -- the ratio penalises length, so it fails worst exactly where a
+    human's short hint is most likely. Confirmed live 2026-09-19: presentmon_target.json recorded
+    MacTray.exe for hint 'angry', PresentMon captured that instead of the game, and the run ended with
+    no PC frame data at all. A short hint now simply keeps waiting, and the substring path catches the
+    game when it launches -- strictly better than locking onto the wrong process early."""
     import difflib
     out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
                          encoding="utf-8", errors="ignore").stdout
@@ -417,20 +473,31 @@ def _fuzzy_match_process(hint):
             names.add(row[0])
     if not names:
         return None
-    hint_norm = hint.lower().replace(" ", "")
-    substr = [n for n in sorted(names) if hint_norm in n[:-4].lower().replace(" ", "")]
+
+    def flat(s):
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    hint_norm = flat(hint)
+    if not hint_norm:
+        return None
+    substr = [n for n in sorted(names) if hint_norm in flat(n[:-4])]
     if substr:
         return substr[0]
-    stripped = {n[:-4]: n for n in names}
-    best = difflib.get_close_matches(hint, list(stripped.keys()), n=1, cutoff=0.45)
-    return stripped[best[0]] if best else None
+
+    if len(hint_norm) < PRESENTMON_HINT_MIN_LEN:
+        return None
+    by_flat = {}
+    for n in sorted(names):
+        by_flat.setdefault(flat(n[:-4]), n)
+    best = difflib.get_close_matches(hint_norm, list(by_flat), n=1, cutoff=PRESENTMON_HINT_RATIO_CUTOFF)
+    return by_flat[best[0]] if best else None
 
 
 PRESENTMON_HINT_WINDOW_S = 300  # how long after VD/Air Link connects to keep trying to resolve a hint
 
 
 def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_target=None,
-            presentmon_hint=None):
+            presentmon_hint=None, presentmon_capture=True):
     """Open-ended monitoring of a live session (no pktmon: the elevated task is intentionally absent).
     Samples until killed, stopped (`cell.py stop <run_id>` or Ctrl+C), or max_seconds elapses; prints one
     status line per status_every, and detects the streaming client's start/stop so the reduction can
@@ -499,7 +566,7 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
          "-EnvFile", files["env"], "-CmFile", files["cm"],
          "-Seconds", str(max_seconds + 60)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    logcat = subprocess.Popen([ADB, "-s", ser, "logcat", "-v", "time", "-s", "VrApi"],
+    logcat = subprocess.Popen([ADB, "-s", ser, "logcat", "-v", "time", "-s", "VrApi", "QC2Comp"],
                               stdout=open(files["logcat"], "a", encoding="utf-8"), stderr=subprocess.DEVNULL)
     pc = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PC_SAMPLER,
                            "-OutFile", files["pc"], "-Seconds", str(max_seconds + 60)],
@@ -524,7 +591,15 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
     presentmon_target_found = False
     presentmon_hint_deadline = None
     presentmon_exe = qsite.presentmon_exe()
-    if presentmon_exe and os.path.exists(presentmon_exe):
+    if not presentmon_capture:
+        # PresentMon attaches its own ETW session to the game's present path, which is the one part of
+        # this harness that touches the thing under measurement -- and the wizard's prompt has always
+        # PROMISED that blank meant "skip", while the code turned blank into None and this branch then
+        # started a SYSTEM-WIDE capture instead. That cost us the only clean A/B available (does the
+        # stutter survive with no PC-side capture at all?), so the promise is now kept: blank really
+        # does skip, and system-wide capture is asked for explicitly with "all".
+        print("PresentMon: skipped for this run (no PC-side frame data will be collected).")
+    elif presentmon_exe and os.path.exists(presentmon_exe):
         if presentmon_hint and not presentmon_target:
             # Defer starting PresentMon at all until the hint resolves to an exact process (see the
             # status-tick loop below) -- no point capturing system-wide (extra data, back to the
@@ -1118,6 +1193,87 @@ def p2p_stats(path):
     return {k: v for k, v in out.items() if v is not None}
 
 
+# Wi-Fi band classification, in one place so every source of "which band" agrees. Edges are the
+# allocation boundaries: 2.4 GHz 2400-2483.5 (ch 1-14), 5 GHz 5150-5895 (U-NII-1..3), 6 GHz
+# 5925-7125 (U-NII-5..8).
+BAND_RANGES = (("2g4", 2400, 2483), ("5g", 5150, 5895), ("6g", 5925, 7125))
+
+
+def band_from_freq(mhz):
+    """Channel centre frequency in MHz -> band label, or None if missing/unrecognised."""
+    try:
+        f = float(str(mhz).strip())
+    except (TypeError, ValueError):
+        return None
+    for name, lo, hi in BAND_RANGES:
+        if lo <= f <= hi:
+            return name
+    return None
+
+
+def detect_band(run_dir, serial=None):
+    """Which Wi-Fi band the headset was on for this run, from the best evidence available.
+
+    Band is an identity field (settings.json and the fingerprint tag), so "unknown" here is not
+    neutral: it splits one configuration into two, minting a separate baseline. Confirmed
+    2026-09-19 -- a run that was streaming on 6 GHz, whose headset sampler happened to write only
+    blank rows, reported band "unknown" and produced the tag `vd_auto_500_unknown` with its own
+    baseline file.
+
+    Evidence order:
+      1. `quest_wifi_samples.tsv` freq_mhz, classified per sample and reduced to the *majority* band.
+         This is the headset's own STA frequency during the session, so it wins whenever any sample
+         is usable. Deliberately not `rows[-1]` (what this replaced): a run that loses the device
+         part-way through, or that only ever wrote blank rows, would otherwise come back "unknown"
+         despite hundreds of valid samples -- and a session that roamed mid-run would report whichever
+         band happened to be last rather than the one it mostly ran on.
+      2. a live `adb shell cmd wifi status` on the headset. Present-tense, so weaker evidence -- it is
+         the band *now*, not during the run -- but the headset is in practice still associated to the
+         same SSID the session ran on, and that beats reporting "unknown". Only reached when (1)
+         produced nothing at all.
+    """
+    counts = {}
+    for row in read_tsv(os.path.join(run_dir, "quest_wifi_samples.tsv")):
+        b = band_from_freq(row.get("freq_mhz"))
+        if b:
+            counts[b] = counts.get(b, 0) + 1
+    if counts:
+        return max(counts, key=counts.get)
+
+    if not os.path.isdir(run_dir):
+        return None  # not a run at all -- never answer this from the live device
+    try:
+        out = _adb("-s", serial or adb_serial(), "shell", "cmd wifi status", timeout=15)
+    except Exception:
+        return None
+    m = re.search(r"Frequency:\s*(\d+)\s*MHz", out or "")
+    return band_from_freq(m.group(1)) if m else None
+
+
+def detect_bluetooth(serial=None):
+    """Headset Bluetooth state as "on"/"off", or None if it can't be determined.
+
+    Recorded as part of a run's identity because it demonstrably changes the measurement. Confirmed
+    2026-09-19: runs split cleanly by it. Bluetooth on -- uplink retries peaked at 62% across 19 burst
+    intervals, 1533 packets lost, the encoder fell to 0% in ~11s stalls and the VR decoder starved at
+    10fps; Bluetooth off, same scenario -- 1.9% mean retries, 2 bursts, 78 packets lost, encoder never
+    below 6%, decoder never below 90fps. Nothing in the artifacts said which state a run was in, so
+    that split read as randomness for most of a session.
+
+    Bluetooth is 2.4GHz and the stream is 6GHz, so this is coexistence on a shared radio front-end
+    rather than band overlap -- and it only bites under the stream's load, which is why an idle
+    headset measured 0.00-0.15% retries with Bluetooth on."""
+    ser = serial or adb_serial()
+    if not ser:
+        return None
+    try:
+        out = _adb("-s", ser, "shell", "settings get global bluetooth_on", timeout=15)
+    except Exception:
+        return None
+    v = (out or "").strip()
+    return {"1": "on", "0": "off"}.get(v)
+
+
 def cm_reduce(path, session_start_dev_s=None, offset_s=0.0, out_tsv=None):
     """Controller/P2P events from appended `dumpsys cm_wifi` snapshots: controller link state transitions
     (CONNECTED_ACTIVE / CONNECTED_INACTIVE / CONNECTING / SEARCHING / DISABLED), P2P channel switches, RSDB
@@ -1213,8 +1369,9 @@ def _rate_series(run_dir):
 
 
 def pc_summary(path):
-    """PC-side sampler summary: NVENC utilization (is the encoder producing?) and Windows TCP retransmit
-    rate (is the transport stalling?)."""
+    """PC-side sampler summary: NVENC utilization (is the encoder producing?), Windows TCP retransmit
+    rate (is the transport stalling?), and DPC/ISR time (is a driver -- audio APOs and vendor audio
+    services are the usual offenders -- stealing the CPU for long enough to stall frames?)."""
     rows = read_tsv(path) if os.path.exists(path) else []
     if not rows:
         return {}
@@ -1240,6 +1397,82 @@ def pc_summary(path):
     sent = col("tcp_sent_per_s")
     if sent:
         out["pc_tcp_sent_mean_per_s"] = round(sum(sent) / len(sent), 1)
+    # `*_mean` columns are the across-core average in each sample, so their mean is the typical DPC/ISR
+    # load; `*_max` columns are the worst single core in each sample, so their max is the worst excursion
+    # any one CPU saw -- the number that matters when a driver storm is pinned to one core.
+    for src, dst in (("dpc_pct_mean", "pc_dpc_pct_mean"), ("isr_pct_mean", "pc_isr_pct_mean")):
+        v = col(src)
+        if v:
+            out[dst] = round(sum(v) / len(v), 2)
+    for src, dst in (("dpc_pct_max", "pc_dpc_pct_max"), ("isr_pct_max", "pc_isr_pct_max")):
+        v = col(src)
+        if v:
+            out[dst] = round(max(v), 2)
+    # Memory and the game's own scheduling state. These separate two failures that look identical in
+    # every other column -- the game pinned at ~10 fps with an idle GPU, which is either memory
+    # starvation (hard faults) or the process being throttled/descheduled (EcoQoS puts it at Idle).
+    avail = col("mem_avail_mb")
+    if avail:
+        out["pc_mem_avail_min_mb"] = min(avail)
+    for src, dst in (("mem_pages_per_s", "pc_mem_pages_max_per_s"),
+                     ("mem_page_faults_per_s", "pc_page_faults_max_per_s"),
+                     ("game_pf_per_s", "pc_game_pf_max_per_s")):
+        v = col(src)
+        if v:
+            out[dst] = round(max(v), 1)
+    gws = col("game_ws_mb")
+    if gws:
+        out["pc_game_ws_mb_mean"] = round(sum(gws) / len(gws), 1)
+    gcpu = col("game_cpu_pct")
+    if gcpu:
+        out["pc_game_cpu_pct_mean"] = round(sum(gcpu) / len(gcpu), 2)
+        out["pc_game_cpu_pct_min"] = min(gcpu)
+    prios = []
+    for r in rows:
+        v = (r.get("game_prio") or "").strip()
+        if v and v not in prios:
+            prios.append(v)
+    if prios:
+        # Report the *most throttled* class seen, not the first or the most common.
+        order = ["Idle", "BelowNormal", "Normal", "AboveNormal", "High", "RealTime"]
+        out["pc_game_prio"] = min(prios, key=lambda p: order.index(p) if p in order else len(order))
+    # The other side of "the game is waiting on something": the VR runtime and the Virtual Desktop
+    # stack, which a game blocked in frame submission would be handing its work to. min matters as much
+    # as max here -- a runtime that STOPS consuming CPU during the stall is as telling as one that
+    # spikes, and either points somewhere different from a stalled game.
+    for src, key in (("streamer_cpu_pct", "streamer"), ("vr_cpu_pct", "vr")):
+        v = col(src)
+        if v:
+            out[f"pc_{key}_cpu_pct_mean"] = round(sum(v) / len(v), 2)
+            out[f"pc_{key}_cpu_pct_max"] = round(max(v), 2)
+            out[f"pc_{key}_cpu_pct_min"] = round(min(v), 2)
+    vw = col("vr_ws_mb")
+    if vw:
+        out["pc_vr_ws_mb_mean"] = round(sum(vw) / len(vw), 1)
+    # Thread states: the per-sample histogram of what the game's threads are waiting on. Reported from
+    # the sample where the game had the LEAST CPU -- i.e. the stall -- because a run-level average would
+    # just be dominated by the idle reason every process shows in bulk, and the histogram is only
+    # interesting at the moment the game stops being scheduled.
+    pairs = []
+    for r in rows:
+        try:
+            cpu_v = float(r.get("game_cpu_pct", ""))
+        except (TypeError, ValueError):
+            continue
+        hist = (r.get("game_thr_wait") or "").strip()
+        if hist:
+            pairs.append((cpu_v, hist, (r.get("top_procs") or "").strip()))
+    if pairs:
+        worst = min(pairs, key=lambda p: p[0])
+        out["pc_game_thr_wait_at_min_cpu"] = worst[1]
+        # Same moment: who else was consuming CPU while the game had the least. This is the check on
+        # "something else stole the machine" that the counter columns can otherwise only answer for
+        # the game and the VR stack.
+        if worst[2]:
+            out["pc_top_procs_at_min_game_cpu"] = worst[2]
+    gth = col("game_threads")
+    if gth:
+        out["pc_game_threads_mean"] = round(sum(gth) / len(gth), 1)
     return out
 
 
@@ -1505,6 +1738,190 @@ def _row_dev_epoch(stamp, ref_epoch):
     return best
 
 
+RETRY_BURST_PCT = 10.0      # per-interval retry rate that counts as a burst
+
+
+def wifi_retry_bursts(path, out_tsv=None):
+    """Per-interval Wi-Fi retry behaviour, instead of one run-long average.
+
+    results already carries `retry_rate_pct`, but that is the whole run averaged, and in the
+    2026-09-19 runs it came out at ~2 % -- which is why "retries are only ~2 %, so the link isn't the
+    bottleneck" survived as a conclusion for so long. Sample by sample the same runs peak at 76 % for
+    about 15 % of their duration, and it is precisely those bursts that stall the entire pipeline
+    (NVENC to 0 %, TCP send halved, the headset's decoders starving at 0.2 frames/s) while RSSI and
+    link rate stay perfect. An average cannot express that, so this reports the distribution and the
+    bursts explicitly, and writes the per-interval series next to the run for correlating against
+    stalls.
+
+    rssi/link are pinned to the burst intervals deliberately: they are the evidence that what is
+    happening is airtime/hand-off behaviour, not a signal problem."""
+    rows = read_tsv(path) if os.path.exists(path) else []
+    if len(rows) < 2:
+        return {}
+
+    def tsec(ts):
+        hh, mm, ss = ts[11:19].split(":")
+        return int(hh) * 3600 + int(mm) * 60 + int(ss)
+    ser = []
+    resets = 0
+    for a, b in zip(rows, rows[1:]):
+        try:
+            dt_s = tsec(b["timestamp"]) - tsec(a["timestamp"])
+            dr = int(b["tx_retries"]) - int(a["tx_retries"])
+            ds = int(b["tx_success"]) - int(a["tx_success"])
+            dl = int(b["tx_lost"]) - int(a["tx_lost"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if dt_s <= 0:
+            continue
+        if dr < 0 or ds < 0 or dl < 0:
+            # Counters went backwards, so the interface restarted between the two samples
+            # (re-association, Wi-Fi re-up, driver reload). The deltas across that pair are
+            # meaningless and the rate built from them is a huge bogus burst -- observed for real
+            # while sampling a headset whose Bluetooth was being toggled. Drop the interval and say
+            # it happened rather than let it dominate p90/max.
+            resets += 1
+            continue
+        ser.append({"clock": b["timestamp"][11:19],
+                    "rate_pct": round(100.0 * dr / max(dr + ds, 1), 2),
+                    "retries_per_s": round(dr / float(dt_s), 1), "lost": dl,
+                    "rssi": int(b.get("rssi") or 0), "link_mbps": int(b.get("link_mbps") or 0)})
+    if not ser:
+        return {}
+    if out_tsv:
+        with open(out_tsv, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f, delimiter="\t")
+            w.writerow(["clock", "rate_pct", "retries_per_s", "lost", "rssi", "link_mbps"])
+            for r in ser:
+                w.writerow([r["clock"], r["rate_pct"], r["retries_per_s"], r["lost"],
+                            r["rssi"], r["link_mbps"]])
+    rates = sorted(r["rate_pct"] for r in ser)
+    bursts = [r for r in ser if r["rate_pct"] > RETRY_BURST_PCT]
+    out = {
+        "retry_rate_p90_pct": rates[min(int(len(rates) * 0.9), len(rates) - 1)],
+        "retry_rate_max_pct": max(rates),
+        "retry_bursts": len(bursts),
+        "retry_bursts_pct": round(100.0 * len(bursts) / len(ser), 1),
+        "retry_lost_packets": sum(r["lost"] for r in ser),
+    }
+    if bursts:
+        out["retry_burst_lost_packets"] = sum(r["lost"] for r in bursts)
+        out["retry_burst_rssi_dbm_min"] = min(r["rssi"] for r in bursts)
+        out["retry_burst_link_mbps_min"] = min(r["link_mbps"] for r in bursts)
+    if resets:
+        # Surfaced deliberately: a reset also corrupts the run-mean retry rate and the
+        # fingerprint's baseline for this run, so a reader needs to know it happened.
+        out["retry_counter_resets"] = resets
+    return out
+
+
+def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, ref_epoch=None):
+    """Decode-side stream stats, straight from the headset's hardware codec process.
+
+    `logcat -s VrApi QC2Comp` (see monitor()'s logcat launch) carries one statistics line roughly every
+    5 seconds per decoder instance out of `mediacodec` / media.hwcodec (the compositor's VrApi line, by
+    contrast, is once a second), e.g.
+
+      I QC2Comp : [avcDLowLat_57] Stats: Pending(0) i/p-done(0) Works: Q: 25235/Done 25236|
+                  Work-Rate: Q(60.0/s ...) Done(59.994/s ...)| Stream: 60.11fps 7.4Mbps
+
+    Why this is worth having: every other headset-side number we collect (VrApi's Stale/FPS/TW/App/CFL)
+    comes from the COMPOSITOR, and the compositor keeps reporting a healthy 90 fps with zero stale
+    frames even while the operator is describing serious stutter -- it is fed by Virtual Desktop, not by
+    the wire, so it cannot see a frame that never arrived. The decoder's own output rate, and the gap
+    between what it has been handed and what it has finished, are the closest thing to "did the video
+    actually arrive", measured on the headset with no ETW involved -- so it stays honest precisely in
+    runs where PresentMon or a trace would be suspected of causing the problem they measure.
+
+    since_dev_s/until_dev_s trim to the VR session. The logcat main buffer holds ~5 minutes, so the
+    capture starts with the *previous* session's backlog: without a window this reducer read seven
+    decoder instances for a single 214s run, spanning three different VD sessions, and then reported
+    whichever had the highest mean bitrate -- i.e. numbers for a stream that had already ended. The
+    instance ids are the tell: they only ever increase, so a run whose decoders step 60 -> 61 -> 62 ->
+    66 is being read across session boundaries."""
+    if not os.path.exists(path):
+        return {}
+    row_re = re.compile(
+        r"^(\d\d-\d\d \d\d:\d\d:\d\d\.\d\d\d).*?QC2Comp[^:]*:\s*\[([^\]]+)\].*?"
+        r"Q:\s*(\d+)/Done\s*(\d+).*?Done\(([\d.]+)/s.*?Stream:\s*([\d.]+)fps\s+([\d.]+)Mbps")
+    rows = []
+    for line in _read_text(path).splitlines():
+        m = row_re.search(line)      # search, not match: the line has a pid/tid prefix before the tag
+        if not m:
+            continue
+        if (since_dev_s or until_dev_s) and ref_epoch:
+            t = _row_dev_epoch(m.group(1), ref_epoch)
+            if t is not None and ((since_dev_s and t < since_dev_s) or
+                                  (until_dev_s and t > until_dev_s)):
+                continue
+        q, done = int(m.group(3)), int(m.group(4))
+        rows.append({"clock": m.group(1), "instance": m.group(2), "q": q, "done": done,
+                     "lag": q - done, "done_per_s": float(m.group(5)),
+                     "stream_fps": float(m.group(6)), "stream_mbps": float(m.group(7))})
+    if not rows:
+        return {}
+    if out_tsv:
+        with open(out_tsv, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f, delimiter="\t")
+            w.writerow(["clock", "instance", "q", "done", "lag", "done_per_s",
+                        "stream_fps", "stream_mbps"])
+            for r in rows:
+                w.writerow([r["clock"], r["instance"], r["q"], r["done"], r["lag"],
+                            r["done_per_s"], r["stream_fps"], r["stream_mbps"]])
+    # Group by decoder instance. The headset runs two at once -- the ~60fps desktop stream and the
+    # 90fps VR stream -- and pooling them made the whole summary meaningless: the 60fps/8Mbps desktop
+    # instance dragged the VR stream's mean to 91.53fps/127.5Mbps and got reported as *the* instance,
+    # so "decode-side starvation" could not be read off it at all. The VR stream carries what the
+    # operator actually experiences, so the scalar keys describe it. Pick by sample count first, with
+    # mean bitrate only as a tie-break: this run also had a 9-sample instance at 259Mbps sitting next
+    # to the real 32-sample stream at 212Mbps, and ranking by bitrate alone headlined the transient
+    # one. Few-sample instances are exactly the short-lived ones (session start, re-negotiation,
+    # teardown) that do not represent the run.
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["instance"], []).append(r)
+    means = {i: sum(x["stream_mbps"] for x in g) / len(g) for i, g in groups.items()}
+    vr = max(groups, key=lambda i: (len(groups[i]), means[i]))
+    sel = groups[vr]
+    fps = [r["stream_fps"] for r in sel]
+    mbps = [r["stream_mbps"] for r in sel]
+
+    # Weight each low sample by the interval it covers. The decoder reports every ~5s, so counting
+    # samples understates starvation in wall-clock terms: a run whose decoder reported 10fps on two
+    # samples was starved for ~10s, not 2 (confirmed against a PC-side stall of the same length). The
+    # sample describes the period since the previous report, so that interval is what it accounts for.
+    def _clock_s(stamp):
+        hh, mm_, ss = stamp.split(":")
+        return int(hh) * 3600 + int(mm_) * 60 + float(ss)
+    starved_s, prev_t = 0.0, None
+    for r in sel:
+        t = _clock_s(r["clock"][6:])          # "MM-DD HH:MM:SS.mmm" -> "HH:MM:SS.mmm"
+        if prev_t is not None and r["stream_fps"] < 60:
+            starved_s += t - prev_t
+        prev_t = t
+
+    return {
+        "codec_stream_instance": vr,
+        "codec_stream_samples": len(sel),
+        "codec_stream_fps_mean": round(sum(fps) / len(fps), 2),
+        "codec_stream_fps_min": min(fps),
+        # Seconds the decoder ran below 60fps, interval-weighted (see above). Kept as a duration rather
+        # than a sample count because that is the number comparable to the PC-side stall it explains.
+        "codec_stream_seconds_below_60fps": round(starved_s, 1),
+        "codec_stream_mbps_mean": round(sum(mbps) / len(mbps), 2),
+        "codec_stream_mbps_min": min(mbps),
+        # A growing handed-in-minus-finished gap means the decoder is being fed faster than it can
+        # finish -- the stream outran the headset rather than the reverse.
+        "codec_stream_lag_max": max(r["lag"] for r in sel),
+        "codec_stream_workrate_min": min(r["done_per_s"] for r in sel),
+        # The remaining decoders in the same run, so their behaviour stays visible rather than silent.
+        "codec_stream_other_instances": ",".join(
+            f"{i}:{round(means[i], 1)}Mbps/{round(sum(x['stream_fps'] for x in g) / len(g), 1)}fps/"
+            f"{len(g)}s"
+            for i, g in sorted(groups.items()) if i != vr),
+    }
+
+
 def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
     """logcat -s VrApi emits one line per second from the pid owning the VR session:
        FPS=90/90,...,Stale=0,Stale2/5/10/max=0/0/0/0,...,TW=1.77ms,App=1.46ms,...,CFL=12.54/16.83,
@@ -1764,19 +2181,41 @@ def results(run_id, overlay_path=None):
     # Direct call, not a sys.executable subprocess: the latter breaks under a frozen/bundled build the
     # same way dashboard.py's old subprocess launch did (see its make_server() docstring) -- there is
     # no plain python.exe to hand a sibling .py file to when sys.executable is the bundled exe itself.
-    w = analyze.reduce_cell(os.path.join(BASE, "runs"), run_id, quest_ip=QUEST_IP, window="30,150")
+    # Only reduce a capture when one actually exists. reduce_cell() is the phase-1 pcap path; a
+    # `monitor` session (every wizard run) never writes one, and calling it unconditionally made the
+    # end of every such run print `{"error": "no capture found in ..."}` -- which reads as "the run
+    # failed", immediately before the real results line.
+    has_capture = any(os.path.exists(os.path.join(run_dir, f)) for f in ("cap.pcapng", "cap.etl"))
+    w = analyze.reduce_cell(os.path.join(BASE, "runs"), run_id, quest_ip=QUEST_IP, window="30,150") \
+        if has_capture else {}
 
     # wifi counter deltas (MAC layer, headset TX direction)
     rows = read_tsv(os.path.join(run_dir, "quest_wifi_samples.tsv"))
     if len(rows) < 2:
         raise RuntimeError("no wifi samples yet in " + run_dir)
-    f, l = rows[0], rows[-1]
 
     def d(k):
-        return int(l[k]) - int(f[k])
+        """Delta of a monotonic counter across the samples that actually carry one.
+
+        This used to read rows[0]/rows[-1] and int() them unconditionally. When the headset is
+        unreachable for part of a run -- wireless adb drops mid-session -- the sampler still writes a
+        row per interval, just with every field empty, and that aborted the whole reduction with
+        `ValueError: invalid literal for int() with base 10: ''` -- throwing away the PC-side results
+        (PresentMon, pc_samples, VrApi) that had captured perfectly. Confirmed live 2026-09-19: a
+        4.3 min run whose quest_wifi_samples.tsv held 139 timestamp-only rows. Taking the first/last
+        *valid* sample also keeps the deltas right for a run that loses the device partway through."""
+        vals = []
+        for r in rows:
+            try:
+                vals.append(int(str(r.get(k, "")).strip()))
+            except (TypeError, ValueError):
+                continue
+        return (vals[-1] - vals[0]) if len(vals) >= 2 else None
+
     tx = d("tx_success"); tr = d("tx_retries"); tl = d("tx_lost"); rx = d("rx_success")
-    retry = round(tr / tx * 100, 3) if tx else None
-    lost = round(tl / tx * 100, 3) if tx else None
+    retry = round(tr / tx * 100, 3) if (tx and tr is not None) else None
+    lost = round(tl / tx * 100, 3) if (tx and tl is not None) else None
+    headset_data_missing = tx is None
 
     # ovr metrics (newest CSV, windowed to the actual cell duration) - VD only; stale_frame_count is
     # a PER-SECOND bucket. The OVR service writes one CSV per session, so a cell with OVR logging
@@ -1828,11 +2267,23 @@ def results(run_id, overlay_path=None):
         "overlay_latency_network_ms": overlay.get("lat_network"), "overlay_latency_decode_ms": overlay.get("lat_decode"),
         "overlay_bitrate_mbps": overlay.get("bitrate_mbps"), "overlay_wifi_mbps": overlay.get("wifi_mbps"),
     }
+    if headset_data_missing:
+        # Every headset-side reduction below will come out null; say so in the artifact rather than
+        # leaving a reader to wonder whether null means zero, not-measured, or a bug.
+        res["headset_data_note"] = ("headset sampler got no usable samples this run (device "
+                                    "unreachable or wireless adb dropped) -- headset-side metrics "
+                                    "(retry/loss, RSSI, thermals, controller link) are null")
     res.update(ovr)
     res.update(ping_stats(os.path.join(run_dir, "ping_samples.txt")))
     res.update(vr_api_reduce(os.path.join(run_dir, "vr_api_logcat.txt"),
                              os.path.join(run_dir, "vr_api_samples.csv"),
                              since_dev_s=vr_start, ref_epoch=vr_start))
+    res.update(codec_stream_reduce(os.path.join(run_dir, "vr_api_logcat.txt"),
+                                   os.path.join(run_dir, "codec_stream_samples.tsv"),
+                                   since_dev_s=vr_start, until_dev_s=sess.get("end_dev_s"),
+                                   ref_epoch=vr_start))
+    res.update(wifi_retry_bursts(os.path.join(run_dir, "quest_wifi_samples.tsv"),
+                                 os.path.join(run_dir, "retry_rate_samples.tsv")))
     res.update({k: v for k, v in tab_deltas(
         os.path.join(run_dir, "quest_net_samples.tsv"),
         ["tcp_retrans_segs", "tcp_in_errs", "wlan0_rx_errs", "wlan0_rx_drop",

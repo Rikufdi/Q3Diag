@@ -6,6 +6,14 @@
 runs/**/cap.pcapng
 runs/**/cap.etl
 
+# WPR traces (CPU/DiskIO/Audio profiles): ~5 MB PER SECOND, so a 10-minute session is several GB.
+# Regenerate with tools/Trace-Session.ps1 and read it in WPA; the conclusions belong in the run's
+# notes, not the trace itself. trace-state.json stays tracked -- it is a few hundred bytes of
+# metadata (when, which profiles, how big).
+runs/**/trace.etl
+runs/**/trace.etl.NGENPDB/
+runs/**/trace-stop.txt
+
 # Machine-bound credentials: Virtual Desktop's DPAPI blobs (ProtectedComputerID,
 # Accounts.OculusQuest) are user+machine scoped secrets. Never publish.
 **/pc_config.json
@@ -29,6 +37,11 @@ probe/**/*-raw/
 
 # AP administration screenshot with the Wi-Fi passphrase rendered in plaintext.
 topology/ap-radio.png
+
+# Bug report written for external submission. Carries the reporter's name and contact address, which a
+# public push would publish. Kept local on purpose -- it is still regenerable from the run artifacts
+# (results.json + retry_rate_samples.tsv + pc_samples.tsv) if it ever needs to be rewritten.
+docs/quest3-bt-wifi-coexistence-report.md
 
 # Third-party aarch64 Android build of iperf3 (BSD-3-Clause). Fetch or build your own.
 tools/iperf3.*

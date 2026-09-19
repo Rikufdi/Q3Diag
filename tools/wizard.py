@@ -158,7 +158,7 @@ def ensure_headset_connected(usb_timeout_s=90):
     warned_unauthorized = False
     while time.time() < deadline:
         out = _adb_devices_raw()
-        m = re.search(r"^(\S+)\t device$", out, re.M)
+        m = re.search(r"^(\S+)[ \t]+device$", out, re.M)
         if m:
             serial = m.group(1)
             break
@@ -218,11 +218,12 @@ def _detect_stack_and_band(run_id):
     """Fill in stack/band after the fact instead of asking upfront -- used by summarize() for every
     run, Quick Test or Advanced alike. Both are already captured as a side effect of a normal run:
     session.json's segment `proc` (the same string monitor()'s own SESSION DETECTED check greps for)
-    distinguishes VD from Air Link, and the last quest_wifi_samples.tsv row's freq_mhz gives the
-    Wi-Fi channel actually in use -- so there's no need to ask a human something the harness already
-    knows once the session has actually run."""
+    distinguishes VD from Air Link, and the headset's own STA frequency gives the Wi-Fi band actually
+    in use (cell.detect_band, which falls back to asking the headset live when the run's own samples
+    are missing) -- so there's no need to ask a human something the harness already knows once the
+    session has actually run."""
     run_dir = os.path.join(BASE, "runs", run_id)
-    stack, band = "unknown", "unknown"
+    stack = "unknown"
 
     sess_path = os.path.join(run_dir, "session.json")
     if os.path.exists(sess_path):
@@ -233,21 +234,14 @@ def _detect_stack_and_band(run_id):
         elif "xrstreamingclient" in proc:
             stack = "airlink"
 
-    wifi_path = os.path.join(run_dir, "quest_wifi_samples.tsv")
-    if os.path.exists(wifi_path):
-        rows = cell.read_tsv(wifi_path)
-        freq = int(float(rows[-1]["freq_mhz"])) if rows and rows[-1].get("freq_mhz") else None
-        if freq:
-            if 2400 <= freq <= 2483:
-                band = "2g4"
-            elif 5150 <= freq <= 5895:
-                band = "5g"
-            elif 5925 <= freq <= 7125:
-                band = "6g"
+    band = cell.detect_band(run_dir) or "unknown"
 
     settings_path = os.path.join(run_dir, "settings.json")
     settings = json.load(open(settings_path))
     settings["stack"], settings["band"] = stack, band
+    # Bluetooth state is captured when the run is configured, but a headset that wasn't reachable yet
+    # leaves it unset; fill it in from the live device rather than leaving a run unlabelled.
+    settings["bt"] = settings.get("bt") or cell.detect_bluetooth() or "unknown"
     json.dump(settings, open(settings_path, "w"), indent=1)
     return stack, band
 
@@ -267,7 +261,8 @@ def quick_session():
     ts = time.strftime("%Y%m%d-%H%M%S")
     run_id = f"{PRIVATE_PREFIX}quick_{ts}"
     _write_settings(run_id, {"run_id": run_id, "stack": "auto", "codec": "auto",
-                              "bitrate_mbps": "auto", "content": "auto", "band": "auto"})
+                              "bitrate_mbps": "auto", "content": "auto", "band": "auto",
+                              "bt": cell.detect_bluetooth() or "unknown"})
     print("Quick Test: no setup questions -- just play normally, press Enter when you're done.")
     return run_id
 
@@ -316,7 +311,8 @@ def configure_session():
     ts = time.strftime("%Y%m%d-%H%M%S")
     run_id = f"{PRIVATE_PREFIX}adv_{bitrate}_{content}_{ts}"
     settings = {"run_id": run_id, "stack": "auto", "codec": "auto", "bitrate_mbps": bitrate,
-                "content": content, "band": "auto"}
+                "content": content, "band": "auto",
+                "bt": cell.detect_bluetooth() or "unknown"}
     _write_settings(run_id, settings)
     return run_id
 
@@ -329,7 +325,11 @@ def ask_presentmon_hint():
     the free-text guess; cell.monitor()'s presentmon_hint handling does the actual fuzzy-matching later,
     against a live process list, for a bounded window starting from when VD/Air Link is actually
     detected connected -- see PRESENTMON_HINT_WINDOW_S in cell.py. Blank skips PC game-fps capture for
-    this run entirely, same as if PresentMon weren't installed."""
+    this run entirely, same as if PresentMon weren't installed. That last promise is the fix's whole
+    point: blank used to return None, which monitor() read as "capture system-wide", so a run intended
+    to have no PC-side capture still had PresentMon's ETW session attached to the game. 'all' is now
+    how you ask for a system-wide capture on purpose.
+    """
     exe = qsite.presentmon_exe()
     if not (exe and os.path.exists(exe)):
         return None
@@ -337,13 +337,118 @@ def ask_presentmon_hint():
     print("If you'd like accurate PC-side fps for the game itself (not just the headset's own frame")
     print("rate), type its name below -- it'll be matched once you actually launch it, so it doesn't")
     print("need to be running yet.")
-    return ask("Game name (blank to skip)", "") or None
+    print("Type 'all' to capture every presenting process, or leave it blank to skip PC-side capture")
+    print("entirely (nothing then attaches to the game).")
+    raw = ask("Game name ('all' = every process, blank = skip)", "").strip()
+    if not raw:
+        return None                      # None -> monitor(presentmon_capture=False)
+    return "" if raw.lower() == "all" else raw   # "" -> capture, system-wide (no hint to match)
 
 
-def run_session(run_id, max_seconds, presentmon_hint=None):
+def start_trace(run_id, max_seconds):
+    """Offer to record a Windows Performance Recorder trace for this session, and start it.
+
+    This exists because the ~110 ms in-frame stalls are invisible to every sampler in runs/. PresentMon
+    says the game's frame took ~110 ms from CPU-start to present, with the GPU idle the whole time and
+    the Present call returning in 0.03 ms -- wall time that is neither CPU work nor the present path --
+    but nothing here says *who* took it. A WPR trace (CPU sampled stacks + DiskIO + Microsoft's
+    Audio-glitch provider) is what names a culprit, and wpr requires Administrator, so this hands off
+    to Trace-Session.ps1 through one UAC prompt.
+
+    Returns True whenever the operator asked for a trace -- including when the handshake below never
+    completed -- so the caller always arranges the stop. The first version returned False on timeout,
+    which meant a helper that came up after the 60 s wait was never told to stop and recorded until
+    its own ceiling; confirmed live 2026-09-19, where the trace did start and the operator reasonably
+    concluded it hadn't, because an elevated window with no output looks exactly like a dead one."""
+    try:
+        ans = input("Record a performance trace for this session (one admin prompt)? [y/N]: ").strip().lower()
+    except EOFError:
+        return False
+    if ans not in ("y", "yes"):
+        return False
+
+    run_dir = os.path.join(BASE, "runs", run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    state_path = os.path.join(run_dir, "trace-state.json")
+    stop_path = os.path.join(run_dir, "trace-stop.txt")
+    for p in (state_path, stop_path):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+    def q(s):
+        return "'" + str(s).replace("'", "''") + "'"
+
+    arglist = ",".join(q(a) for a in ("-NoProfile", "-ExecutionPolicy", "Bypass",
+                                      "-File", qsite.script("trace_session"),
+                                      "-RunDir", run_dir,
+                                      "-MaxSeconds", str(int(max_seconds) + 120)))
+    subprocess.Popen(["powershell", "-NoProfile", "-Command",
+                      f"Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @({arglist})"])
+    print("Waiting for the trace to come up -- approve the admin prompt (its window stays open).")
+    for _ in range(120):
+        time.sleep(1)
+        if not os.path.exists(state_path):
+            continue
+        try:
+            # utf-8-sig, not the default: the state file is written by PowerShell, whose
+            # `Set-Content -Encoding UTF8` emits a BOM, and json.load() rejects that outright. With the
+            # default encoding the handshake below failed on every poll for the full 120 s -- confirmed
+            # live 2026-09-19, where a run's whole monitoring window was eaten by the wait.
+            st = json.load(open(state_path, encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if st.get("error"):
+            print(f"  trace did not start: {st['error']} -- continuing without it")
+            return True
+        print(f"  tracing {', '.join(st.get('profiles') or [])} -> runs/{run_id}/trace.etl")
+        return True
+    print("  no handshake from the trace helper yet. If you approved the prompt it IS recording -- "
+          "check the new PowerShell window -- and it will be stopped when this session ends.")
+    return True
+
+
+def stop_trace(run_id):
+    """Drop the flag Trace-Session.ps1 is watching. It finalises the ETL itself -- `wpr -stop` takes
+    roughly half a minute for a multi-hundred-MB trace -- so the wizard never blocks on it."""
+    run_dir = os.path.join(BASE, "runs", run_id)
+    if not os.path.exists(os.path.join(run_dir, "trace-state.json")):
+        return
+    with open(os.path.join(run_dir, "trace-stop.txt"), "w"):
+        pass
+    print(f"Trace stopping -- runs/{run_id}/trace.etl is finalised in the background; "
+          f"runs/{run_id}/trace-state.json reports the size once it lands.")
+
+
+def _drain_stdin():
+    """Throw away anything already sitting in the console input buffer; returns how many keys went.
+
+    run_session's stop is a bare input(), so a keystroke pressed earlier -- while waiting out a slow
+    handshake or the UAC prompt -- is consumed the instant the session starts and ends it immediately.
+    The count is returned rather than discarded silently because the three ways that wait can end
+    (a real key, stdin closing, Ctrl+C) are otherwise indistinguishable after the fact, and we have
+    already lost three runs to guessing which it was."""
+    try:
+        import msvcrt
+    except ImportError:
+        return 0
+    n = 0
+    try:
+        while msvcrt.kbhit():
+            msvcrt.getch()
+            n += 1
+    except Exception:
+        pass
+    return n
+
+
+def run_session(run_id, max_seconds, presentmon_hint=None, presentmon_capture=True):
     _print_header("Live session")
     monitor_thread = threading.Thread(target=cell.monitor, args=(run_id, max_seconds),
-                                      kwargs={"presentmon_hint": presentmon_hint}, daemon=True)
+                                      kwargs={"presentmon_hint": presentmon_hint,
+                                              "presentmon_capture": presentmon_capture},
+                                      daemon=True)
     monitor_thread.start()
     time.sleep(1.5)  # let monitor's startup (clock sample, sampler spawn) happen before dashboard reads files
 
@@ -353,9 +458,21 @@ def run_session(run_id, max_seconds, presentmon_hint=None):
     dash_thread.start()
     print(f"Live dashboard: http://127.0.0.1:{port}/")
     print(f"Play now. Session will stop automatically after {max_seconds // 60} min if you don't stop it first.")
+    # Arm the stop key only after a delay. A reflexive Enter at the "Play now" moment used to end the
+    # session on the spot -- and whatever the mechanism actually is (a buffered key, a console event,
+    # stdin closing), three runs were lost to a ~4 s window before anyone could react. Sleeping first
+    # and draining after means anything pressed in this window is discarded instead of stopping the
+    # run; a deliberate Enter later still works normally.
+    ARM_DELAY_S = 8
+    print(f"   (stop key arms in {ARM_DELAY_S}s -- ignore anything you press before then)")
+    time.sleep(ARM_DELAY_S)
+    drained = _drain_stdin()
+    t_session_start = time.time()
+    stop_reason = "key"
     try:
         input("Press Enter when you're done playing to stop and reduce the session... ")
     except KeyboardInterrupt:
+        stop_reason = "ctrl+c"
         print("\n(Ctrl+C) stopping...")
     except EOFError:
         # monitor_thread is daemon=True, so if this propagated as an uncaught exception instead
@@ -363,7 +480,27 @@ def run_session(run_id, max_seconds, presentmon_hint=None):
         # it -- skipping cell.monitor()'s `finally` (sampler subprocesses terminated, session.json/
         # clock.json closed out) and leaving PresentMon/PowerShell samplers/ping orphaned. Confirmed
         # live: stdin closing unexpectedly here (not just Ctrl+C) is exactly that scenario.
-        print("\n(stdin closed) stopping...")
+        #
+        # Do NOT treat it as "stop" either: stdin going away is not the operator asking to finish,
+        # and the earlier prompts prove it was usable moments ago. Keep the session alive until its
+        # own time limit (or a stop file dropped beside the run) instead of silently truncating it.
+        stop_reason = "stdin-eof"
+        print("\n(stdin closed -- the session will now run to its time limit; drop "
+              "runs/<id>/session-stop.txt to end it early)")
+        stop_file = os.path.join(BASE, "runs", run_id, "session-stop.txt")
+        while monitor_thread.is_alive() and not os.path.exists(stop_file):
+            time.sleep(1)
+    try:
+        with open(os.path.join(BASE, "runs", run_id, "session-stop.json"), "w") as f:
+            json.dump({"reason": stop_reason,
+                       "after_s": round(time.time() - t_session_start, 1),
+                       "drained_keys": drained,
+                       "stdin_isatty": sys.stdin.isatty() if hasattr(sys.stdin, "isatty") else None},
+                      f, indent=1)
+    except OSError:
+        pass
+    print(f"Session ended ({stop_reason} after {time.time() - t_session_start:.0f}s"
+          + (f", {drained} stray key(s) discarded)" if drained else ")"))
     cell.stop_monitor(run_id)
     monitor_thread.join(timeout=30)
     if monitor_thread.is_alive():
@@ -380,9 +517,10 @@ def summarize(run_id):
     cell.results(run_id)
     res_path = os.path.join(BASE, "runs", run_id, "results.json")
     if os.path.exists(res_path):
-        note = json.load(open(res_path)).get("pc_game_fps_note")
-        if note:
-            print(f"PC game-fps: {note}")
+        res = json.load(open(res_path))
+        for key, label in (("pc_game_fps_note", "PC game-fps"), ("headset_data_note", "Headset data")):
+            if res.get(key):
+                print(f"{label}: {res[key]}")
     diff = cell.fingerprint(run_id)
     if diff.get("baseline"):
         print("No prior baseline for this configuration -- this run is now the baseline for future "
@@ -420,7 +558,11 @@ def main():
         run_id = quick_session() if quick else configure_session()
         presentmon_hint = ask_presentmon_hint()
         max_minutes = ask_int("Max session length, in minutes (you can stop earlier)", 60)
-        run_session(run_id, max_minutes * 60, presentmon_hint=presentmon_hint)
+        tracing = start_trace(run_id, max_minutes * 60)
+        run_session(run_id, max_minutes * 60, presentmon_hint=presentmon_hint,
+                    presentmon_capture=(presentmon_hint is not None))
+        if tracing:
+            stop_trace(run_id)
         summarize(run_id)
     except KeyboardInterrupt:
         print("\ncancelled")
