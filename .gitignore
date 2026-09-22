@@ -32,8 +32,12 @@ tools/*.log
 # device's own output.
 /probe/
 
-# AP administration screenshot with the Wi-Fi passphrase rendered in plaintext.
-topology/ap-radio.png
+# Notes about this rig's network environment (AP model, band settings, the environment lock that
+# pins firmware/driver versions) plus the AP admin screenshot. Collected by hand/agents during the
+# measurement work and read by nothing in the tool -- so, like probe/, they are not part of the tool
+# and do not ship. The screenshot carries the Wi-Fi passphrase in plaintext (the passphrase was
+# redacted in the notes, not in the screenshot, which is why the whole directory goes).
+/topology/
 
 # Bug report written for external submission. Carries the reporter's name and contact address, which a
 # public push would publish. Kept local on purpose -- it is still regenerable from the run artifacts
