@@ -69,9 +69,10 @@ tools/vendor/
 # presentmon_exe configured); the reduced pc_game_fps_* fields land in results.json/results.csv instead.
 runs/**/presentmon.csv
 
-# Fingerprint baselines are this rig's own "current normal" per configuration (AP, driver, OS build),
-# not a portable measurement -- regenerate with `cell.py fingerprint <run_id> --save-baseline`.
-baseline/fingerprints/
+# The whole baseline/ tree is this rig's own local state, not a portable measurement: per-configuration
+# fingerprint "current normal" (regenerate with `cell.py fingerprint <run_id> --save-baseline`) plus the
+# manual iperf3/ping network baselines. Nothing here is committed, and it was purged from history too.
+/baseline/
 
 # Private/scratch runs: any run_id you prefix with "priv_" (e.g. priv_ram3600_...) is a personal
 # sanity-check, not part of the published dataset. `cell.py results`/`passive` already skip its row in

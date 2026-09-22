@@ -18,9 +18,9 @@ Under the following terms:
                  measures that legally restrict others from doing anything the
                  license permits.
 
-This covers: `instrumentation.json`, `runs/**`, `probe/**`, `baseline/**`,
-`topology/**`, and the data/documentation parts of `tools/` (for example
-`QUEST-AGENT-PLAYBOOK.md`, `vd-codec-enum.md`).
+This covers: `instrumentation.json`, `runs/**`, `probe/**`, `topology/**`, and
+the data/documentation parts of `tools/` (for example `QUEST-AGENT-PLAYBOOK.md`,
+`vd-codec-enum.md`).
 
 The harness source code is licensed separately under MIT -- see LICENSE.
 
