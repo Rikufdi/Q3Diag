@@ -46,6 +46,48 @@ RES = os.path.join(qsite.TOOLS_DIR, "elev-do-res.txt")
 CMD = os.path.join(qsite.TOOLS_DIR, "elev-do-cmd.txt")
 OVR_DIR = qsite.get("ovr_metrics_dir")
 
+# ---------------------------------------------------------------- data footprint
+# Measured write rates for the artifacts a run produces, in MB per minute. The wizard and the live
+# dashboard use these to tell the operator where the data lands and how big it gets before an
+# hour-long session quietly fills a disk. Every number is observed, with its source, so it can be
+# re-derived rather than trusted:
+#   samplers   -- every always-on file (Wi-Fi/net/env/sf TSVs, VrApi logcat, OVR metrics, pc_samples,
+#                 ping). vd_nvenc_soak_20260916-0420 wrote ~7.2 MB of non-trace artifacts in 49.4 min.
+#   presentmon -- the optional game-fps CSV, ~253 B per present, so it scales with the game's own frame
+#                 rate: measured 2.4-2.7 MB/min at ~160 fps (priv_ram3600, vd_live_20260916-1831/0555).
+#   trace      -- the optional WPR trace (CPU profile, 2 ms interval). trace-state.json etl_mb over
+#                 capture_seconds: 7811/332, 3879/172, 4196/188 MB/s -> 22.3-23.5 MB/s, so ~1.3 GB/min.
+DATA_RATES_MB_PER_MIN = {
+    "samplers": 0.15,
+    "presentmon": 2.5,
+    "trace": 1300.0,
+}
+
+
+def estimate_run_mb(minutes, presentmon=False, trace=False):
+    """Estimated artifact size in MB for a session of `minutes`, broken down by component plus a
+    "total" key. Only the components actually enabled are included, so a Quick Test with no trace and
+    no PresentMon stays tiny."""
+    mb = {"samplers": DATA_RATES_MB_PER_MIN["samplers"] * minutes}
+    if presentmon:
+        mb["presentmon"] = DATA_RATES_MB_PER_MIN["presentmon"] * minutes
+    if trace:
+        mb["trace"] = DATA_RATES_MB_PER_MIN["trace"] * minutes
+    mb["total"] = sum(mb.values())
+    return mb
+
+
+def format_mb(mb):
+    """Human-readable size: GB once it would be awkward as MB, so a traced hour reads as GB not MB.
+    Sub-10 MB keeps a decimal so the tiny always-on sampler files for a short Quick Test don't all
+    round to the same whole number."""
+    if mb >= 1024:
+        return f"{mb / 1024:.2f} GB"
+    if mb < 10:
+        return f"{mb:.1f} MB"
+    return f"{mb:.0f} MB"
+
+
 # results.csv schema: identity columns + everything the reductions can produce.
 ID_COLS = ["run_id", "stack", "codec", "bitrate_mbps", "content", "band"]
 MEAS_COLS = [
@@ -631,10 +673,13 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
              "-Seconds", str(remaining_seconds + 60), "-ExtraArgs", qsite.get("presentmon_args", ""),
              "-TargetProcess", target_name or ""],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        rate = DATA_RATES_MB_PER_MIN["presentmon"]
         if target_name:
-            print(f"PresentMon game-fps capture started, targeting '{target_name}' -> {files['presentmon']}")
+            print(f"PresentMon game-fps capture started, targeting '{target_name}' -> {files['presentmon']} "
+                  f"(writes ~{rate:.1f} MB/min, scaling with the game's frame rate)")
         else:
-            print(f"PresentMon game-fps capture started (system-wide, no target given) -> {files['presentmon']}")
+            print(f"PresentMon game-fps capture started (system-wide, no target given) -> {files['presentmon']} "
+                  f"(writes ~{rate:.1f} MB/min, scaling with the frame rate of whatever presents)")
         return p
 
     presentmon = None

@@ -43,6 +43,10 @@ topology/ap-radio.png
 # (results.json + retry_rate_samples.tsv + pc_samples.tsv) if it ever needs to be rewritten.
 docs/quest3-bt-wifi-coexistence-report.md
 
+# Working handoff notes for whoever picks this up locally. Kept out of the repository so the published
+# tree stays the tool plus its documented measurements, rather than a moving list of what is next.
+handoff.md
+
 # Third-party aarch64 Android build of iperf3 (BSD-3-Clause). Fetch or build your own.
 tools/iperf3.*
 

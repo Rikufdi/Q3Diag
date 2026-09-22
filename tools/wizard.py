@@ -31,6 +31,7 @@ whether to save this run as the new baseline.
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -317,7 +318,7 @@ def configure_session():
     return run_id
 
 
-def ask_presentmon_hint():
+def ask_presentmon_hint(run_id):
     """Ask for a rough game name to feed PresentMon, if PresentMon is configured at all. Deliberately
     NOT a live match against currently-running processes: a VR title is almost always launched *after*
     VD/Air Link connects (sometimes minutes later, from inside the headset), so asking before the
@@ -329,11 +330,21 @@ def ask_presentmon_hint():
     point: blank used to return None, which monitor() read as "capture system-wide", so a run intended
     to have no PC-side capture still had PresentMon's ETW session attached to the game. 'all' is now
     how you ask for a system-wide capture on purpose.
+
+    Also the point where the operator is told where PresentMon's CSV lands and how fast it grows --
+    it is the one artifact here whose size tracks something (the game's frame rate) rather than the
+    session clock, so it is the one worth warning about before the session starts rather than after.
     """
     exe = qsite.presentmon_exe()
     if not (exe and os.path.exists(exe)):
         return None
     _print_header("PC game frame-rate capture (optional)")
+    rate = cell.DATA_RATES_MB_PER_MIN["presentmon"]
+    print(f"PresentMon found: {exe}")
+    print(f"Capture is written to {os.path.join(BASE, 'runs', run_id, 'presentmon.csv')}, growing by")
+    print(f"roughly {rate:.1f} MB per minute of play (it scales with the game's frame rate, so a")
+    print("high-fps title writes more; a 60 min session is on the order of 150 MB).")
+    print()
     print("If you'd like accurate PC-side fps for the game itself (not just the headset's own frame")
     print("rate), type its name below -- it'll be matched once you actually launch it, so it doesn't")
     print("need to be running yet.")
@@ -366,6 +377,12 @@ def start_trace(run_id, max_seconds):
         return False
     if ans not in ("y", "yes"):
         return False
+
+    gb_min = cell.DATA_RATES_MB_PER_MIN["trace"] / 1024
+    print(f"A WPR trace (CPU profile) writes about {gb_min:.2f} GB per minute of recording. It is")
+    print("staged in %TEMP% while recording and moved to runs/<id>/trace.etl when the session ends,")
+    print("so both the system drive and the run drive need room. It also perturbs the session it")
+    print("measures -- prefer short traced sessions.")
 
     run_dir = os.path.join(BASE, "runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
@@ -443,6 +460,50 @@ def _drain_stdin():
     return n
 
 
+def _print_data_footprint(run_id, max_minutes, presentmon, trace):
+    """Print where this session writes and how big it is expected to get, before it starts.
+
+    Everything a run produces stays inside its own folder under runs/ -- nothing here is uploaded or
+    committed (runs/ is git-ignored and these runs carry the priv_ prefix). The point of this block is
+    the size warning: the always-on samplers are trivial (~0.15 MB/min), PresentMon scales with the
+    game's frame rate (~2.5 MB/min), and a WPR trace is in a class of its own at ~1.3 GB/min, enough
+    that an unbounded trace on a nearly-full disk is a real way to end a session badly. The free-space
+    check below uses the run drive, which is where everything lands -- including the trace, which is
+    staged in %TEMP% while recording and moved here on stop, so both drives need the headroom.
+    """
+    run_dir = os.path.join(BASE, "runs", run_id)
+    rates = cell.DATA_RATES_MB_PER_MIN
+    est = cell.estimate_run_mb(max_minutes, presentmon=presentmon, trace=trace)
+    _print_header("Where this session writes")
+    print(f"Run folder:  {run_dir}")
+    print("Everything recorded stays there. Nothing is uploaded anywhere, and runs/ is excluded from")
+    print("git, so this data is only ever published if you choose to publish it yourself.")
+    print()
+    print(f"Expected size for a {max_minutes} min session:")
+    print(f"  samplers (Wi-Fi, thermals, fps, ping, logcat)   ~{rates['samplers']:.2f} MB/min   ->  "
+          f"~{cell.format_mb(est['samplers'])}")
+    if presentmon:
+        print(f"  PresentMon game-fps  presentmon.csv             ~{rates['presentmon']:.1f} MB/min   ->  "
+              f"~{cell.format_mb(est['presentmon'])}")
+    if trace:
+        print(f"  WPR trace            trace.etl                  ~{rates['trace'] / 1024:.2f} GB/min   ->  "
+              f"~{cell.format_mb(est['trace'])}")
+    total_note = "  (almost all of it the trace)" if trace else ""
+    print(f"  TOTAL                                           ~{cell.format_mb(est['total'])}{total_note}")
+    if trace:
+        print()
+        print("  !! A performance trace is large and perturbs the session it measures -- keep traced")
+        print("     sessions short, and leave free space on both this drive and the system (%TEMP%) one.")
+    try:
+        free_mb = shutil.disk_usage(run_dir).free / (1024 * 1024)
+        print(f"\nFree space on the run drive: {cell.format_mb(free_mb)}")
+        if est["total"] > free_mb * 0.9:
+            print(f"  WARNING: the estimate (~{cell.format_mb(est['total'])}) could exhaust this drive. "
+                  "Shorten the session or free space first.")
+    except OSError:
+        pass
+
+
 def run_session(run_id, max_seconds, presentmon_hint=None, presentmon_capture=True):
     _print_header("Live session")
     monitor_thread = threading.Thread(target=cell.monitor, args=(run_id, max_seconds),
@@ -457,6 +518,7 @@ def run_session(run_id, max_seconds, presentmon_hint=None, presentmon_capture=Tr
     dash_thread = threading.Thread(target=dash_srv.serve_forever, daemon=True)
     dash_thread.start()
     print(f"Live dashboard: http://127.0.0.1:{port}/")
+    print(f"Recording to:   {os.path.join(BASE, 'runs', run_id)}")
     print(f"Play now. Session will stop automatically after {max_seconds // 60} min if you don't stop it first.")
     # Arm the stop key only after a delay. A reflexive Enter at the "Play now" moment used to end the
     # session on the spot -- and whatever the mechanism actually is (a buffered key, a console event,
@@ -556,9 +618,11 @@ def main():
         ensure_headset_connected()
         ensure_streamer_running()
         run_id = quick_session() if quick else configure_session()
-        presentmon_hint = ask_presentmon_hint()
+        presentmon_hint = ask_presentmon_hint(run_id)
         max_minutes = ask_int("Max session length, in minutes (you can stop earlier)", 60)
         tracing = start_trace(run_id, max_minutes * 60)
+        _print_data_footprint(run_id, max_minutes,
+                              presentmon=(presentmon_hint is not None), trace=tracing)
         run_session(run_id, max_minutes * 60, presentmon_hint=presentmon_hint,
                     presentmon_capture=(presentmon_hint is not None))
         if tracing:

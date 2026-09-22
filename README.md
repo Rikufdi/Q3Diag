@@ -5,15 +5,16 @@ actually working well, or just *feels* off. It watches your Wi-Fi link, your GPU
 headset's frame rate during a real play session, then tells you plainly whether anything about
 this run looks worse than your own established normal.
 
-Windows-only
+Windows-only.
 
 --------------------------------------------------------------------------------------------------
 
 ## Requirements ##
 
-- Windows 10/11, with Python 3.10+ and adb installed.
-- NVIDIA GPU** (nvidia-smi, used to read encoder utilization).
-- Virtual Desktop Streamer and/or *Air Link, already set up.
+- Windows 10/11, Python 3.10+ and adb installed (the packaged release bundles adb, so a release
+  download needs neither of these beyond Windows itself).
+- NVIDIA GPU (nvidia-smi, used to read encoder utilization).
+- Virtual Desktop Streamer and/or Air Link, already set up.
 - Meta Quest 3, debugging enabled (one-time setup below).
 
 ## Setup ##
@@ -27,29 +28,41 @@ On the headset:
    notification like: "Allow USB Connection" or similar. If you don't see a notification,
    check the notification history and press the notification there to allow.
 
-## Running a session (while live you can watch it on localhost (http://127.0.0.1:8765/)
+That USB connection is also the entire tool configuration: on the first run the wizard reads the
+headset's Wi-Fi IP off the device and remembers it, so later runs need no cable and no config file.
 
-Before starting the watcher, decide on a codec and bitrate you want to use as a baseline and
-set that up first in the VD streamer app (untick dynamic bitrate) and in the Streaming
-settings in the VD headset app. If using air link, just set a fixed bitrate in the headset.
+## Running a session ##
 
-First session is to record a baseline which is used to evaluate the later runs. Recommended
-to do an advanced setup where you set the expected bitrate (same as you chose earlier)
-and then set content type accordingly (motion if recording while playing, static otherwise).
+Launch the tool — `Q3Diag-Wizard.exe` from a release, or `python tools/wizard.py` from a checkout.
+The wizard is the supported entry point; it walks through everything below in order.
 
-1. Connect headset to PC with a cable with data transfer. Some usb cables only do charging.
-2. Launch Q3Diag.exe
-3. The tool connects to the headset via cable and adb, checks the ip of the headset and then
-   starts adb wirelessly. When wireless adb is running, you can unplug your usb cable.
-4. In the tool you will first have 2 choices, quick and advanced.
-   4.1. Quick test - starts a measuring session straight away and auto-detecs most settings.
-   4.2. Advanced - configure the watcher to measure against a specific scenario.
-      4.2.1 Set bitrate target. Useful to test numbers on specific target bitrates.
-      4.2.2 Set the watcher to expect a regular play session with motion or a static one.
-   4.3 Set max time in minutes the watcher will run before terminating.
-5. Press enter to start the watcher.
-6. You press Enter when you're done playing. It stops cleanly, crunches the numbers, and
-   prints a plain verdict.
+While a session is running you can watch it live at **http://127.0.0.1:8765/** — that page shows
+the link, encoder, and frame-rate numbers as they come in, plus where the run is writing and how
+much has landed on disk so far.
+
+1. **Choose Quick Test or Advanced.**
+   - **Quick Test** asks nothing. It measures whatever is happening right now and files its
+     comparison baseline under `codec/bitrate: auto`, so it is a fast health check rather than a
+     controlled comparison.
+   - **Advanced** asks for a target bitrate and a content type (motion/static). Set that same fixed
+     bitrate in the streamer/headset first (dynamic bitrate off), so runs are comparable to each
+     other and to their own baseline.
+   Stack and Wi-Fi band are detected from the run itself in both modes; you are never asked for
+   something the harness can see for itself.
+2. **Connect the headset.** Already paired over Wi-Fi, it just connects. If the wireless link has
+   dropped (common after a headset reboot), it will ask you to plug in the USB cable once, re-pair
+   wireless adb, and tell you when you can unplug. "Not reachable over Wi-Fi" is normal and
+   self-resolving — the wizard retries, then falls back to the cable.
+3. **Confirm the streaming stack is running** (Virtual Desktop / OVR server), and start it if not.
+4. **Optional: PC game frame-rate capture (PresentMon).** Only offered when PresentMon is installed
+   (see *Optional extra capture* below). Type the game's name and it will be matched once you
+   actually launch it — it does not need to be running yet. `all` captures every presenting process;
+   blank genuinely skips PC-side capture.
+5. **Set a max session length** in minutes. It stops by itself at that point if you forget to.
+6. **Optional: record a Windows Performance Recorder trace** (one admin prompt). Off by default;
+   see the size warning below before saying yes.
+7. **Play.** Press **Enter** when you're done — deliberately not `q` — and the wizard stops cleanly,
+   crunches the numbers, and prints a plain verdict.
 
 ```
 Verdict: consistent with the saved baseline -- no metric drifted beyond its threshold.
@@ -64,7 +77,51 @@ Verdict: 1 metric(s) drifted beyond the baseline:
 
 First time running a particular combination (say, Virtual Desktop + H.264+ + 500 Mbps)? There's no
 baseline to compare against yet — the wizard says so and saves this run *as* the baseline, so every
-future session with that same setup has something to be checked against.
+future session with that same setup has something to be checked against. If a drift is expected and
+fine, you can also save the new run as the new baseline at the end of a session.
+
+## Where your data is saved, and how big it gets ##
+
+Every session writes into its own folder:
+
+```
+<install folder>/runs/<run_id>/
+```
+
+That is `runs/<run_id>/` next to `Q3Diag-Wizard.exe` for a release, or next to `tools/` in a
+checkout. Each run defaults to a `priv_` prefix (`priv_quick…`, `priv_adv…`) and `runs/` is
+git-ignored, so a run is private and is only ever published if you publish it yourself. Nothing is
+uploaded anywhere.
+
+The wizard prints the exact folder and an estimate for your chosen session length before it starts,
+and the live dashboard tracks how much has actually been written. Rough rates, measured from real
+runs, so you can size a session:
+
+| Artifact | Written to | Typical size |
+|---|---|---|
+| Always-on samplers (Wi-Fi counters, thermals, headset fps/logcat, OVR metrics, PC samples, ping) | several small files in the run folder | **~0.15 MB/min** (≈ 9 MB/hour) |
+| PresentMon game frame times *(optional)* | `presentmon.csv` | **~2.5 MB/min** (≈ 150 MB/hour at ~160 fps) — scales with the game's frame rate |
+| Windows Performance Recorder *(optional)* | `trace.etl` | **~1.3 GB/min** (≈ 78 GB/hour) — the big one |
+
+Everything except PresentMon and the trace grows with the session clock and stays small; the trace
+is in a class of its own. If you enable it:
+
+- it is staged in `%TEMP%` (on your system drive) while recording and moved into the run folder when
+  the session ends, so **both** the system drive and the run drive need the headroom;
+- it also perturbs the session it is measuring — a traced session stutters more than an untraced one
+  — so keep traced sessions short and treat them as a separate investigation, not a normal run.
+
+The wizard checks free space on the run drive and warns before starting if the estimate could
+exhaust it.
+
+## Optional extra capture ##
+
+Neither of these is bundled; both are optional and only used if you point the tool at them.
+
+- **PresentMon** — accurate PC-side fps for the game itself. Download the console-app build from
+  [PresentMon releases](https://github.com/GameTechDev/PresentMon/releases/latest) and either drop
+  it in as `PresentMon.exe` beside the tool or set `presentmon_exe` in `site.json`.
+- **iperf3** — throughput baseline testing, same policy: bring your own copy.
 
 ## Troubleshooting
 
@@ -74,17 +131,15 @@ headset on and accept the debugging prompt if it reappears, and the wizard re-es
 wireless connection from there.
 
 Nothing happens when you plug in USB, adb devices shows nothing — adb was started before cable
-plugged in, Run `adb kill-server` then try again.
+plugged in. Run `adb kill-server` then try again.
 
 Numbers look worse than expected right after a hardware/driver change — that's exactly what
 this tool is for. Run a session, look at the verdict; if you're confident the new normal is fine,
-save the new run as the new baseline
+save the new run as the new baseline.
 
-## What this data is used for
-
-Every session you run gets reduced into a small results file "Priv_*" and a row in
-results.csv. The data gathered is automatically excluded from commits (if forking the repo) when
-they're named "Priv_*"
+Downloaded release flagged by Windows Defender — the packaged exe is unsigned, and unsigned
+PyInstaller binaries routinely trip Defender's ML heuristic. Only a submitted-and-whitelisted hash
+or a paid signing certificate reliably clears it.
 
 ## License
 

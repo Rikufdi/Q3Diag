@@ -73,11 +73,35 @@ def _last_wifi_rate(run_dir, window_s=RETRY_WINDOW_S):
     return out
 
 
+def _dir_size_mb(path):
+    """Total bytes currently written under a run folder, in MB. Metadata only (no file is opened), so
+    it is cheap enough to call on every dashboard poll -- which is the point: the operator watches the
+    folder grow against the estimate instead of discovering at the end that a trace filled the disk."""
+    total = 0
+    try:
+        for entry in os.scandir(path):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return round(total / (1024 * 1024), 1)
+
+
 def status(run_id):
     run_dir = os.path.join(BASE, "runs", run_id)
-    out = {"run_id": run_id, "updated_at": time.strftime("%H:%M:%S"), "exists": os.path.isdir(run_dir)}
+    out = {"run_id": run_id, "updated_at": time.strftime("%H:%M:%S"),
+           "exists": os.path.isdir(run_dir), "run_dir": run_dir}
     if not out["exists"]:
         return out
+    out["data_rates"] = cell.DATA_RATES_MB_PER_MIN
+    out["written_mb"] = _dir_size_mb(run_dir)
+    out["presentmon_on"] = (os.path.exists(os.path.join(run_dir, "presentmon_target.json"))
+                            or os.path.exists(os.path.join(run_dir, "presentmon.csv")))
+    out["trace_on"] = (os.path.exists(os.path.join(run_dir, "trace-state.json"))
+                       or os.path.exists(os.path.join(run_dir, "trace.etl")))
     out.update(_last_wifi_rate(run_dir))
     net = cell.tail_row(os.path.join(run_dir, "quest_net_samples.tsv"))
     out.update({"wlan0_rx_errs": net.get("wlan0_rx_errs"), "wlan0_rx_drop": net.get("wlan0_rx_drop"),
@@ -133,7 +157,8 @@ PAGE = """<!doctype html>
 body { font: 14px/1.4 ui-monospace, Consolas, monospace; margin: 0; padding: 16px;
        background: light-dark(#f6f7f9, #111318); color: light-dark(#1a1d23, #e6e8eb); }
 h1 { font-size: 16px; margin: 0 0 4px; }
-#meta { color: light-dark(#666, #999); margin-bottom: 12px; }
+#meta { color: light-dark(#666, #999); margin-bottom: 4px; }
+#where { color: light-dark(#666, #999); font-size: 12px; margin-bottom: 12px; white-space: pre-wrap; }
 #banner { display: none; background: #b3261e; color: #fff; padding: 8px 12px; border-radius: 6px;
           margin-bottom: 12px; white-space: pre-wrap; }
 #banner.show { display: block; }
@@ -158,6 +183,7 @@ canvas { width: 100%; height: 140px; background: light-dark(#fff, #1b1e25);
 <body>
 <h1>Q3Diag live dashboard</h1>
 <div id="meta">run: <span id="run_id">-</span> | last update <span id="updated_at">-</span></div>
+<div id="where">-</div>
 <div id="banner"></div>
 <div class="grid" id="grid"></div>
 <canvas id="chart" width="800" height="140"></canvas>
@@ -215,10 +241,24 @@ function fmtClass(text) {
   return "";
 }
 
+function fmtMB(mb) {
+  return mb >= 1024 ? (mb / 1024).toFixed(2) + " GB" : Math.round(mb) + " MB";
+}
+
 function render(d) {
   d.presentmon_target_display = presentmonTargetDisplay(d.presentmon_target);
   document.getElementById("run_id").textContent = d.run_id;
   document.getElementById("updated_at").textContent = d.updated_at + (d.exists ? "" : "  (run not found yet)");
+  const r = d.data_rates || {};
+  const perMin = (r.samplers || 0) + (d.presentmon_on ? (r.presentmon || 0) : 0) +
+                 (d.trace_on ? (r.trace || 0) : 0);
+  const parts = ["samplers ~" + (r.samplers || 0).toFixed(2) + " MB/min"];
+  if (d.presentmon_on) parts.push("PresentMon ~" + (r.presentmon || 0) + " MB/min -> presentmon.csv");
+  if (d.trace_on) parts.push("WPR trace ~" + ((r.trace || 0) / 1024).toFixed(2) + " GB/min -> trace.etl (staged in %TEMP%)");
+  document.getElementById("where").textContent =
+    (d.exists ? "saving to " + d.run_dir + "   |   written so far " + fmtMB(d.written_mb || 0)
+              : "run folder not created yet: " + (d.run_dir || "?")) +
+    "   |   " + parts.join("  \u00b7  ") + "   (~" + perMin.toFixed(2) + " MB/min total)";
   const banner = document.getElementById("banner");
   const fp = d.fingerprint;
   if (fp && fp.flags && fp.flags.length) {
