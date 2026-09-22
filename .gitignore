@@ -39,6 +39,11 @@ tools/*.log
 # redacted in the notes, not in the screenshot, which is why the whole directory goes).
 /topology/
 
+# The headset capability/identity snapshot from the original probe work. Nothing in the tool reads it
+# (no code path mentions the file at all); it is a record of one device, like probe/ and topology/, so
+# it does not ship either. Quest-Probe.ps1 reports the same things on demand.
+/instrumentation.json
+
 # Bug report written for external submission. Carries the reporter's name and contact address, which a
 # public push would publish. Kept local on purpose -- it is still regenerable from the run artifacts
 # (results.json + retry_rate_samples.tsv + pc_samples.tsv) if it ever needs to be rewritten.
