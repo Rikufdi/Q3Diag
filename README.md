@@ -1,11 +1,20 @@
 ## Quest 3 PCVR Wi-Fi streaming diagnostics ##
 
-A tool for checking whether your wireless PCVR streaming setup via Virtual Desktop or Air Link is
-actually working well, or just *feels* off. It watches your Wi-Fi link, your GPU encoder, and the
-headset's frame rate during a real play session, then tells you plainly whether anything about
-this run looks worse than your own established normal.
+Measures a wireless PCVR session over Virtual Desktop or Air Link, then compares it against your own
+previously recorded baseline for the same configuration and names the metrics that drifted past their
+thresholds.
 
-Windows-only.
+During a real play session it records the headset's Wi-Fi counters (retries, losses, RSSI, link rate,
+band), its thermals and GPU load, the compositor's frame rate and stale frames, the PC's NVENC and GPU
+use with DPC/ISR time and memory pressure, the game process's CPU and thread-wait states,
+PC-to-headset ping latency and loss, and optionally the game's own frame times through PresentMon.
+
+Three optional extras: a live local dashboard while the session runs, a Windows Performance Recorder
+trace for attributing stalls, and a pre-session iperf3 link-capacity check (TCP both ways, then a UDP
+ramp).
+
+A guided wizard drives it end to end: connect, measure, verdict, baseline. Windows-only, and
+everything a session records is written under runs/<run_id>/, stays local, and is excluded from git.
 
 --------------------------------------------------------------------------------------------------
 
