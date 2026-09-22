@@ -532,25 +532,30 @@ def stop_trace(run_id):
 
 
 def _drain_stdin():
-    """Throw away anything already sitting in the console input buffer; returns how many keys went.
+    """Throw away anything already sitting in the console input buffer.
 
-    run_session's stop is a bare input(), so a keystroke pressed earlier -- while waiting out a slow
-    handshake or the UAC prompt -- is consumed the instant the session starts and ends it immediately.
-    The count is returned rather than discarded silently because the three ways that wait can end
-    (a real key, stdin closing, Ctrl+C) are otherwise indistinguishable after the fact, and we have
-    already lost three runs to guessing which it was."""
+    Returns (keys_discarded, enter_among_them). Enter is singled out because it is the only key that
+    *means* "stop" here: the arm-window message has to say whether the operator's Enter was swallowed,
+    and a bare byte count lies about that -- a ConPTY pushes a couple of non-key bytes into the buffer
+    at startup (observed b"\\x00" and b"="), which made an untouched run look like two discarded
+    keystrokes.
+
+    The count is still returned, because the three ways this wait can end (a real key, stdin closing,
+    Ctrl+C) are otherwise indistinguishable after the fact, and we have already lost three runs to
+    guessing which it was."""
     try:
         import msvcrt
     except ImportError:
-        return 0
-    n = 0
+        return 0, False
+    n, enter = 0, False
     try:
         while msvcrt.kbhit():
-            msvcrt.getch()
+            if msvcrt.getch() in (b"\r", b"\n"):
+                enter = True
             n += 1
     except Exception:
         pass
-    return n
+    return n, enter
 
 
 def _print_data_footprint(run_id, max_minutes, presentmon, trace):
@@ -596,6 +601,61 @@ def _print_data_footprint(run_id, max_minutes, presentmon, trace):
         pass
 
 
+def _wait_for_stop_key(monitor_thread, run_id):
+    """Block until the session should end; return why -- "key", "stop-file" or "monitor-ended".
+
+    The stop key is read with msvcrt, not input(). input() goes through the CRT's console line
+    reader, and on a real rig that returned EOF the instant it was reached: the session was treated as
+    detached, every later Enter was ignored, and Ctrl+C was the only way out (reported 2026-09-22,
+    twice -- the second time with "(stdin closed ...)" on screen, which is that EOF branch). msvcrt
+    reads the console input buffer directly, needs no line buffering, and is the same primitive the
+    arm-window drain already uses; verified to see keystrokes in a classic console *and* under a
+    ConPTY (which is what Windows Terminal gives a child process -- the usual way this runs).
+
+    Only Enter or q counts. A ConPTY pushes a few non-key bytes into the buffer at startup (observed:
+    b"\\x00", b"="), so anything else is ignored rather than treated as a keypress.
+
+    When the console cannot be read at all -- stdin piped, process detached -- a blocking read on
+    sys.stdin is used instead. EOF there is NOT a stop: stdin going away says nothing about what the
+    operator wants, and the earlier prompts prove it was usable moments ago, so the session keeps
+    running to its own time limit (or the stop file) exactly as it did before.
+    """
+    stop_file = os.path.join(BASE, "runs", run_id, "session-stop.txt")
+    try:
+        import msvcrt
+    except ImportError:                       # non-Windows dev checkout
+        msvcrt = None
+
+    hit = {"key": False}
+
+    def read_stdin():
+        try:
+            sys.stdin.readline()
+            hit["key"] = True
+        except Exception:
+            pass                              # EOF/closed stdin: not a stop request, see above
+
+    reader = None
+    while monitor_thread.is_alive() and not os.path.exists(stop_file) and not hit["key"]:
+        if msvcrt is not None:
+            try:
+                if msvcrt.kbhit() and msvcrt.getch() in (b"\r", b"\n", b"q", b"Q"):
+                    return "key"
+            except Exception:
+                print("   (console key reads failed -- falling back to a plain stdin read; "
+                      "Ctrl+C always ends the session)")
+                msvcrt = None
+        if msvcrt is None and reader is None:
+            reader = threading.Thread(target=read_stdin, daemon=True)
+            reader.start()
+        time.sleep(0.1)
+    if hit["key"]:
+        return "key"
+    if os.path.exists(stop_file):
+        return "stop-file"
+    return "monitor-ended"
+
+
 def run_session(run_id, max_seconds, presentmon_hint=None, presentmon_capture=True):
     _print_header("Live session")
     monitor_thread = threading.Thread(target=cell.monitor, args=(run_id, max_seconds),
@@ -620,38 +680,25 @@ def run_session(run_id, max_seconds, presentmon_hint=None, presentmon_capture=Tr
     ARM_DELAY_S = 8
     print(f"   (stop key arms in {ARM_DELAY_S}s -- anything you press before then is discarded)")
     time.sleep(ARM_DELAY_S)
-    drained = _drain_stdin()
+    drained, drained_enter = _drain_stdin()
     # Say what happened to the arm window. The drain above is deliberate, but a silently swallowed
     # keystroke is indistinguishable from a stop key that does not work -- which is exactly how it got
     # reported: Enter pressed during the window, session still running, Ctrl+C the only way out (a
-    # signal, so the drain never sees it). Naming the discard, and the moment the key goes live, means
-    # the operator knows to press again instead of concluding the tool is broken.
+    # signal, so the drain never sees it). Only Enter is worth naming: it is the key that means stop,
+    # and ConPTY startup bytes would otherwise be reported as discarded keystrokes on a run where
+    # nothing was pressed at all.
     print("   Stop key armed"
-          + (f" -- {drained} earlier keypress(es) discarded, press Enter again to stop." if drained
-             else "."))
+          + (" -- the Enter you pressed during the arm window was discarded; press it again to stop."
+             if drained_enter else "."))
     t_session_start = time.time()
-    stop_reason = "key"
+    print()
+    print("Press Enter when you're done playing to stop and reduce the session...")
     try:
-        _pause("Press Enter when you're done playing to stop and reduce the session... ")
+        stop_reason = _wait_for_stop_key(monitor_thread, run_id)
     except KeyboardInterrupt:
         stop_reason = "ctrl+c"
         print("\n(Ctrl+C) stopping...")
-    except EOFError:
-        # monitor_thread is daemon=True, so if this propagated as an uncaught exception instead
-        # of being caught here, the process would die immediately and take the thread down with
-        # it -- skipping cell.monitor()'s `finally` (sampler subprocesses terminated, session.json/
-        # clock.json closed out) and leaving PresentMon/PowerShell samplers/ping orphaned. Confirmed
-        # live: stdin closing unexpectedly here (not just Ctrl+C) is exactly that scenario.
-        #
-        # Do NOT treat it as "stop" either: stdin going away is not the operator asking to finish,
-        # and the earlier prompts prove it was usable moments ago. Keep the session alive until its
-        # own time limit (or a stop file dropped beside the run) instead of silently truncating it.
-        stop_reason = "stdin-eof"
-        print("\n(stdin closed -- the session will now run to its time limit; drop "
-              "runs/<id>/session-stop.txt to end it early)")
-        stop_file = os.path.join(BASE, "runs", run_id, "session-stop.txt")
-        while monitor_thread.is_alive() and not os.path.exists(stop_file):
-            time.sleep(1)
+    print()
     try:
         with open(os.path.join(BASE, "runs", run_id, "session-stop.json"), "w") as f:
             json.dump({"reason": stop_reason,
@@ -661,8 +708,10 @@ def run_session(run_id, max_seconds, presentmon_hint=None, presentmon_capture=Tr
                       f, indent=1)
     except OSError:
         pass
-    print(f"Session ended ({stop_reason} after {time.time() - t_session_start:.0f}s"
-          + (f", {drained} stray key(s) discarded)" if drained else ")"))
+    spoken = {"key": "Enter", "stop-file": "stop file", "monitor-ended": "time limit"}.get(
+        stop_reason, stop_reason)
+    print(f"Session ended ({spoken} after {time.time() - t_session_start:.0f}s"
+          + (", after a pre-arm Enter was discarded)" if drained_enter else ")"))
     cell.stop_monitor(run_id)
     monitor_thread.join(timeout=30)
     if monitor_thread.is_alive():
