@@ -40,6 +40,8 @@ While a session is running you can watch it live at **http://127.0.0.1:8765/** â
 the link, encoder, and frame-rate numbers as they come in, plus where the run is writing and how
 much has landed on disk so far.
 
+![The live dashboard during a session](docs/dashboard.jpg)
+
 1. **Choose Quick Test or Advanced.**
    - **Quick Test** asks nothing. It measures whatever is happening right now and files its
      comparison baseline under `codec/bitrate: auto`, so it is a fast health check rather than a

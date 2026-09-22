@@ -14,6 +14,7 @@ release/dist/Q3Diag-Wizard-<version>-win64.zip) containing:
                               a fallback only: an adb already on PATH or in site.json wins
   NOTICE.txt                 Google's upstream notice for adb, shipped verbatim
   THIRD_PARTY_NOTICES.md, LICENSE, LICENSE-DATA, README.md   copied in as-is
+  docs/dashboard.jpg         the dashboard screenshot the README embeds (not local-only docs/)
 
 adb is the only third-party binary bundled -- it's load-bearing (nothing works without talking to
 the headset). PresentMon and iperf3 deliberately are not, even though both are used elsewhere in
@@ -238,6 +239,15 @@ def copy_extras():
         src = os.path.join(REPO_ROOT, name)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(app_dir, name))
+    # README.md embeds docs/dashboard.jpg, so the released tree needs that file at the same relative
+    # path or the packaged README renders with a broken image. Listed explicitly rather than copying
+    # docs/ wholesale: docs/ also holds local-only material (the git-ignored bug report), and a whole
+    # directory copy would silently start shipping whatever gets dropped in there next.
+    shot = os.path.join(REPO_ROOT, "docs", "dashboard.jpg")
+    if os.path.exists(shot):
+        shot_dir = os.path.join(app_dir, "docs")
+        os.makedirs(shot_dir, exist_ok=True)
+        shutil.copy2(shot, os.path.join(shot_dir, "dashboard.jpg"))
 
 
 def make_zip():
