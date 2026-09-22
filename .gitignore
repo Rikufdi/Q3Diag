@@ -2,17 +2,12 @@
 # Quest 3 diagnostics -- what stays out of git, and why.
 # ---------------------------------------------------------------------------
 
-# Wire captures: 30-120 MB per run, no textual diff value, regenerable by re-running a cell.
-runs/**/cap.pcapng
-runs/**/cap.etl
-
-# WPR traces (CPU/DiskIO/Audio profiles): ~5 MB PER SECOND, so a 10-minute session is several GB.
-# Regenerate with tools/Trace-Session.ps1 and read it in WPA; the conclusions belong in the run's
-# notes, not the trace itself. trace-state.json stays tracked -- it is a few hundred bytes of
-# metadata (when, which profiles, how big).
-runs/**/trace.etl
-runs/**/trace.etl.NGENPDB/
-runs/**/trace-stop.txt
+# Everything a session writes lives under runs/<run_id>/: sampler TSVs, OVR CSV, VrApi logcat,
+# results.json, and optionally a wire capture (cap.pcapng/cap.etl) or a WPR trace (GB per minute).
+# It is local test data tied to one machine's AP/headset, not a portable measurement, so none of it
+# ships -- and it was purged from history. Regenerate by re-running a session; a trace is read in WPA
+# and the conclusions belong in the write-ups, not in the trace.
+/runs/
 
 # Machine-bound credentials: Virtual Desktop's DPAPI blobs (ProtectedComputerID,
 # Accounts.OculusQuest) are user+machine scoped secrets. Never publish.
@@ -65,20 +60,14 @@ tools/iperf3.*
 # https://github.com/GameTechDev/PresentMon/releases/latest and point presentmon_exe at it.
 tools/vendor/
 
-# Raw PresentMon per-frame capture (regenerable by re-running a monitored session with
-# presentmon_exe configured); the reduced pc_game_fps_* fields land in results.json/results.csv instead.
-runs/**/presentmon.csv
-
 # The whole baseline/ tree is this rig's own local state, not a portable measurement: per-configuration
 # fingerprint "current normal" (regenerate with `cell.py fingerprint <run_id> --save-baseline`) plus the
 # manual iperf3/ping network baselines. Nothing here is committed, and it was purged from history too.
 /baseline/
 
-# Private/scratch runs: any run_id you prefix with "priv_" (e.g. priv_ram3600_...) is a personal
-# sanity-check, not part of the published dataset. `cell.py results`/`passive` already skip its row in
-# results.csv for the same reason (see is_private_run() in tools/cell.py) -- this covers the
-# rest of the run directory (TSVs, results.json, fingerprint_diff.json, ...).
-runs/priv_*/
+# Any run_id prefixed with "priv_" (e.g. priv_ram3600_...) is a personal sanity-check: `cell.py
+# results`/`passive` skip its row in the local results.csv (see is_private_run() in tools/cell.py).
+# The run directory itself needs no rule -- runs/ is ignored wholesale above.
 
 # Python
 __pycache__/
