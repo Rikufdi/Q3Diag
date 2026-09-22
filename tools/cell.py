@@ -709,8 +709,8 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
     else:
         print("PresentMon missing, skipping PC-side fps collection. Download the console-app build "
               "from https://github.com/GameTechDev/PresentMon/releases/latest, save it as "
-              f"PresentMon.exe in {qsite.TOOLS_DIR} (or set presentmon_exe in site.json) to also get "
-              "PC-side fps data next run.")
+              f"PresentMon.exe in {qsite.VENDOR_DIR} (or set presentmon_exe in site.json) to also "
+              "get PC-side fps data next run.")
 
     start_dev = time.time() + off
     sf_layer, sf_prev, sf_next, sf_found_at = None, 0, 0.0, 0.0

@@ -121,9 +121,12 @@ exhaust it.
 Neither of these is bundled; both are optional and only used if you point the tool at them.
 
 - **PresentMon** — accurate PC-side fps for the game itself. Download the console-app build from
-  [PresentMon releases](https://github.com/GameTechDev/PresentMon/releases/latest) and either drop
-  it in as `PresentMon.exe` beside the tool or set `presentmon_exe` in `site.json`.
-- **iperf3** — throughput baseline testing, same policy: bring your own copy.
+  [PresentMon releases](https://github.com/GameTechDev/PresentMon/releases/latest), rename it to
+  `PresentMon.exe`, and drop it in the release's **`vendor/`** folder — the wizard auto-detects it and
+  says `PresentMon found: …` during session setup. A release ships `vendor/presentmon_here.txt` with
+  the same instructions. Alternatively set `presentmon_exe` in `site.json` to a path anywhere.
+- **iperf3** — not called by any part of the tool. `vendor/iperf3_here.txt` is just a place to keep a
+  copy if you want to run your own throughput measurements alongside a session.
 
 ## Troubleshooting
 

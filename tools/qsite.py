@@ -36,6 +36,11 @@ TOOLS_DIR = sys._MEIPASS if FROZEN else os.path.dirname(os.path.abspath(__file__
 # wizard's own "discover the headset's IP once, remember it" feature would silently lose that memory
 # on every single run.
 PERSIST_DIR = os.path.dirname(sys.executable) if FROZEN else TOOLS_DIR
+# Where the optional third-party tools the user supplies themselves go (PresentMon, iperf3). Next to
+# the exe, deliberately not inside TOOLS_DIR: in a frozen build TOOLS_DIR is the bundle's own
+# _internal/ folder, which is no place to ask a user to drop files. Matches the dev tree's tools/vendor/
+# (git-ignored). release/build_release.py ships this folder with a readme in it.
+VENDOR_DIR = os.path.join(PERSIST_DIR, "vendor")
 DEFAULT_BASE_DIR = os.path.dirname(PERSIST_DIR) if not FROZEN else PERSIST_DIR
 CONFIG_PATH = os.environ.get("QUEST3_SITE") or os.path.join(PERSIST_DIR, "site.json")
 EXAMPLE_PATH = os.path.join(TOOLS_DIR, "site.example.json")
@@ -90,8 +95,8 @@ DEFAULTS = {
     "elev_task": "PCVR-Elev",
     "ovr_metrics_dir": "/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics",
     "powershell": "powershell",
-    # Optional: PC game frame-time capture (Sample-GameFPS.ps1). Not vendored, not auto-discovered --
-    # empty means "skip PC game-fps capture". See Sample-GameFPS.ps1 for what it does and why.
+    # Optional: PC game frame-time capture (Sample-GameFPS.ps1). Not vendored, but auto-detected from
+    # vendor/ (see presentmon_exe()) -- empty means "skip PC game-fps capture".
     "presentmon_exe": "",
     "presentmon_args": "",
     # Optional: tools/dashboard.py listen port.
@@ -178,13 +183,18 @@ def presentmon_exe():
     """Optional, so unlike path() this returns None instead of raising when there's nothing to find --
     cell.py's monitor() already treats a missing PresentMon as "skip this sampler", not an error, and
     prints a message telling you how to add it. Checks site.json/QUEST3_PRESENTMON_EXE first (a real
-    install always wins), then a copy placed as PresentMon.exe next to this module -- deliberately not
-    bundled by release/build_release.py (see its module docstring for why), but auto-detected if you
-    drop one in yourself, so that needs no site.json edit either."""
+    install always wins), then a copy dropped into vendor/ as PresentMon.exe -- the folder the release
+    ships with a readme, and the one cell.py's "missing" message points at -- then a copy beside this
+    module, which is where it had to go before VENDOR_DIR existed. Not bundled by
+    release/build_release.py (see its module docstring for why), but auto-detected if you drop one in
+    yourself, so that needs no site.json edit either."""
     configured = get("presentmon_exe")
     if configured:
         return configured
-    bundled = os.path.join(TOOLS_DIR, "PresentMon.exe")
-    return bundled if exists(bundled) else None
+    for candidate in (os.path.join(VENDOR_DIR, "PresentMon.exe"),
+                      os.path.join(TOOLS_DIR, "PresentMon.exe")):
+        if exists(candidate):
+            return candidate
+    return None
 
 

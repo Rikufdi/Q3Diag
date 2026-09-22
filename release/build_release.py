@@ -15,6 +15,9 @@ release/dist/Q3Diag-Wizard-<version>-win64.zip) containing:
   NOTICE.txt                 Google's upstream notice for adb, shipped verbatim
   THIRD_PARTY_NOTICES.md, LICENSE, LICENSE-DATA, README.md   copied in as-is
   docs/dashboard.jpg         the dashboard screenshot the README embeds (not local-only docs/)
+  vendor/                    placeholders for the tools you supply yourself: drop PresentMon.exe
+                              here and the wizard auto-detects it; iperf3 is listed too, though no
+                              code path calls it (see each *_here.txt)
 
 adb is the only third-party binary bundled -- it's load-bearing (nothing works without talking to
 the headset). PresentMon and iperf3 deliberately are not, even though both are used elsewhere in
@@ -58,6 +61,59 @@ ADB_FILES = ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "NOTICE.txt")
 # find these on its own; they have to be listed explicitly.
 DATA_FILES = ("Sample-Quest.ps1", "Sample-PC.ps1", "Sample-GameFPS.ps1", "Quest-Probe.ps1",
               "Trace-Session.ps1", "site.example.json")
+
+# Placeholders for the optional third-party tools the user supplies themselves, written into the
+# release's vendor/ folder (regenerated on every build -- vendor/ is not user state, so anything
+# dropped there is NOT preserved across rebuilds; a dev's own copy belongs in tools/vendor/, which
+# site.json points at). PresentMon is auto-detected from here by qsite.presentmon_exe(); iperf3 is
+# called by no code path at all, which its note says outright rather than implying the tool uses it.
+VENDOR_NOTES = {
+    "presentmon_here.txt": """\
+PresentMon is not bundled -- download it yourself.
+==================================================
+
+1. Get the console-app build (e.g. PresentMon-2.5.1-x64.exe) from:
+
+     https://github.com/GameTechDev/PresentMon/releases/latest
+
+2. Rename it to exactly  PresentMon.exe  and drop it in this folder, so you end up with:
+
+     vendor\\PresentMon.exe
+
+That is all. The wizard auto-detects it on the next run -- session setup will say
+"PresentMon found: ..." -- and then offers optional PC-side frame-rate capture for the game
+itself, as opposed to the headset compositor's frame rate that every other sampler sees.
+
+You can also leave this folder alone and point the tool at a build kept anywhere else, by
+setting "presentmon_exe" in site.json (or exporting QUEST3_PRESENTMON_EXE). A real install
+wins over this folder.
+
+Why it is not included: PresentMon is MIT-licensed and free to redistribute, but every extra
+executable in this download makes antivirus tools more likely to flag it as suspicious.
+""",
+    "iperf3_here.txt": """\
+iperf3 is not bundled -- and nothing in this tool runs it for you.
+===============================================================
+
+There is no iperf3 code path in this harness: neither the wizard nor cell.py will ever launch
+it. This folder is only somewhere to keep a copy if you want to take your own throughput
+measurements alongside a session.
+
+1. Get a build -- a Windows .exe, or the matching Android/aarch64 binary for the headset:
+
+     https://software.es.net/iperf/
+
+   (or your own package manager)
+
+2. Place it in this folder, e.g.
+
+     vendor\\iperf3.exe
+
+Why it is not included: the same reason as PresentMon -- extra executables make antivirus
+tools more likely to flag the download, and this one is not needed even for the optional
+features.
+""",
+}
 
 
 def ensure_pyinstaller():
@@ -248,6 +304,13 @@ def copy_extras():
         shot_dir = os.path.join(app_dir, "docs")
         os.makedirs(shot_dir, exist_ok=True)
         shutil.copy2(shot, os.path.join(shot_dir, "dashboard.jpg"))
+    # vendor/ = where the user drops PresentMon (and optionally iperf3) themselves. Written rather
+    # than copied from the repo so it exists even in a fresh checkout, and regenerated on every build.
+    vendor_dir = os.path.join(app_dir, "vendor")
+    os.makedirs(vendor_dir, exist_ok=True)
+    for name, text in VENDOR_NOTES.items():
+        with open(os.path.join(vendor_dir, name), "w", encoding="utf-8", newline="\r\n") as fh:
+            fh.write(text)
 
 
 def make_zip():
