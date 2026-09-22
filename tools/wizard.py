@@ -341,9 +341,8 @@ def ask_presentmon_hint(run_id):
     _print_header("PC game frame-rate capture (optional)")
     rate = cell.DATA_RATES_MB_PER_MIN["presentmon"]
     print(f"PresentMon found: {exe}")
-    print(f"Capture is written to {os.path.join(BASE, 'runs', run_id, 'presentmon.csv')}, growing by")
-    print(f"roughly {rate:.1f} MB per minute of play (it scales with the game's frame rate, so a")
-    print("high-fps title writes more; a 60 min session is on the order of 150 MB).")
+    print(f"Capture is written to {os.path.join(BASE, 'runs', run_id, 'presentmon.csv')}, about")
+    print(f"{rate:.1f} MB per minute of play -- it scales with the game's frame rate.")
     print()
     print("If you'd like accurate PC-side fps for the game itself (not just the headset's own frame")
     print("rate), type its name below -- it'll be matched once you actually launch it, so it doesn't")
@@ -379,10 +378,8 @@ def start_trace(run_id, max_seconds):
         return False
 
     gb_min = cell.DATA_RATES_MB_PER_MIN["trace"] / 1024
-    print(f"A WPR trace (CPU profile) writes about {gb_min:.2f} GB per minute of recording. It is")
-    print("staged in %TEMP% while recording and moved to runs/<id>/trace.etl when the session ends,")
-    print("so both the system drive and the run drive need room. It also perturbs the session it")
-    print("measures -- prefer short traced sessions.")
+    print(f"A WPR trace writes about {gb_min:.2f} GB per minute (staged in %TEMP%, moved into the run")
+    print("folder at the end), so both drives need room -- and it perturbs the session it measures.")
 
     run_dir = os.path.join(BASE, "runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
@@ -463,10 +460,10 @@ def _drain_stdin():
 def _print_data_footprint(run_id, max_minutes, presentmon, trace):
     """Print where this session writes and how big it is expected to get, before it starts.
 
-    Everything a run produces stays inside its own folder under runs/ -- nothing here is uploaded or
-    committed (runs/ is git-ignored and these runs carry the priv_ prefix). The point of this block is
-    the size warning: the always-on samplers are trivial (~0.15 MB/min), PresentMon scales with the
-    game's frame rate (~2.5 MB/min), and a WPR trace is in a class of its own at ~1.3 GB/min, enough
+    Everything a run produces stays inside its own folder under runs/ -- nothing is uploaded, and
+    runs/ is git-ignored so a fork cannot commit it. The point of this block is the size warning:
+    the always-on samplers are trivial (~0.15 MB/min), PresentMon scales with the game's frame rate
+    (~2.5 MB/min), and a WPR trace is in a class of its own at ~1.3 GB/min, enough
     that an unbounded trace on a nearly-full disk is a real way to end a session badly. The free-space
     check below uses the run drive, which is where everything lands -- including the trace, which is
     staged in %TEMP% while recording and moved here on stop, so both drives need the headroom.
@@ -476,8 +473,7 @@ def _print_data_footprint(run_id, max_minutes, presentmon, trace):
     est = cell.estimate_run_mb(max_minutes, presentmon=presentmon, trace=trace)
     _print_header("Where this session writes")
     print(f"Run folder:  {run_dir}")
-    print("Everything recorded stays there. Nothing is uploaded anywhere, and runs/ is excluded from")
-    print("git, so this data is only ever published if you choose to publish it yourself.")
+    print("Nothing is uploaded. runs/ is git-ignored, so forking this project won't commit session data.")
     print()
     print(f"Expected size for a {max_minutes} min session:")
     print(f"  samplers (Wi-Fi, thermals, fps, ping, logcat)   ~{rates['samplers']:.2f} MB/min   ->  "
@@ -492,8 +488,8 @@ def _print_data_footprint(run_id, max_minutes, presentmon, trace):
     print(f"  TOTAL                                           ~{cell.format_mb(est['total'])}{total_note}")
     if trace:
         print()
-        print("  !! A performance trace is large and perturbs the session it measures -- keep traced")
-        print("     sessions short, and leave free space on both this drive and the system (%TEMP%) one.")
+        print("  !! A trace perturbs the session it measures -- keep traced runs short, and leave room")
+        print("     on both this drive and the system (%TEMP%) one.")
     try:
         free_mb = shutil.disk_usage(run_dir).free / (1024 * 1024)
         print(f"\nFree space on the run drive: {cell.format_mb(free_mb)}")
