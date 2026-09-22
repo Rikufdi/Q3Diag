@@ -206,15 +206,20 @@ def presentmon_exe():
 def iperf3_exe():
     """PC-side iperf3 client for the optional link check (linkcheck.py). Optional like
     presentmon_exe(): None when there is nothing to find, and the wizard simply does not offer the
-    check. Checks site.json/QUEST3_IPERF3_EXE first, then vendor/ -- where the release's note file
-    tells you to drop it -- then PATH, so a winget/scoop install works with no config at all."""
+    check. Checks site.json/QUEST3_IPERF3_EXE first, then vendor/iperf3.exe -- where the release's
+    note file tells you to drop the Windows build -- then PATH, so a winget/scoop install works with
+    no config at all.
+
+    Deliberately does NOT accept an extensionless vendor/iperf3: that name is the *Android* build
+    (see iperf3_android()), and matching it here hands the headset's ARM binary to Windows'
+    CreateProcess, which fails with a bare WinError 193. Confirmed live 2026-09-22 with both files in
+    vendor/."""
     configured = get("iperf3_exe")
     if configured:
         return configured
-    for name in ("iperf3.exe", "iperf3"):
-        candidate = os.path.join(VENDOR_DIR, name)
-        if exists(candidate):
-            return candidate
+    candidate = os.path.join(VENDOR_DIR, "iperf3.exe")
+    if exists(candidate):
+        return candidate
     return shutil.which("iperf3")
 
 

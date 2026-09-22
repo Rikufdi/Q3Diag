@@ -16,10 +16,12 @@ It is deliberately run BEFORE the session, with no video:
     measurements; and
   - its numbers are only meaningful against an otherwise-idle link.
 
-Orientation: the headset runs the *server* (its aarch64 build, pushed to /data/local/tmp, which is
-also the side we care about) and the PC runs the client. Downlink is therefore a plain client->server
-test, and uplink is `-R`. Nothing needs an inbound allowance on the PC except the `-R` data
-connection, which is why a failing reverse test is reported rather than treated as fatal.
+Orientation: the headset runs the *server* (its aarch64 build, pushed to /data/local/tmp) and the PC
+runs the client. TCP runs both ways -- downlink as a plain client->server test, uplink with `-R` --
+but the UDP ramp is always *reversed* (headset sends, PC receives): the Android iperf3 receive path
+drops UDP regardless of the link, so loss measured with the PC as the sender is an artifact of the
+tool, not a measurement of the link. Nothing needs an inbound allowance on the PC except the `-R`
+data connections, which is why a failing reverse TCP test is reported rather than treated as fatal.
 
 Usage:
   python linkcheck.py <run_id> [--ip <headset_ip>] [--serial <adb_serial>]
@@ -171,6 +173,25 @@ def reduce_udp(j):
             "packets": s.get("packets")}
 
 
+def _binary_kind(path):
+    """Cheap first-bytes identification, so a build for the wrong platform is named as such instead of
+    surfacing as `OSError: WinError 193` (feeding an ARM binary to CreateProcess) or as an
+    unexplained "server exited immediately" after pushing 3 MB over the link we are trying to
+    measure. Only the header is read."""
+    try:
+        head = open(path, "rb").read(20)
+    except OSError:
+        return "unreadable"
+    if head[:2] == b"MZ":
+        return "windows-pe"
+    if head[:4] == b"\x7fELF":
+        machine = head[18] | (head[19] << 8)
+        return {0xB7: "elf-aarch64", 0x3E: "elf-x86-64", 0x28: "elf-arm"}.get(machine, "elf-other")
+    if head[:2] == b"#!":
+        return "shell script"
+    return "unknown"
+
+
 def run_linkcheck(run_id, host, serial=None, pc_exe=None, headset_bin=None,
                   seconds=DEFAULT_SECONDS, udp_mbps=(200, 500, 1000), progress=print):
     """Run the full check into runs/<run_id>/ and return the result dict (also written as
@@ -187,6 +208,15 @@ def run_linkcheck(run_id, host, serial=None, pc_exe=None, headset_bin=None,
         raise LinkCheckError("no headset IP to test against")
     if not serial:
         raise LinkCheckError("no adb serial -- connect the headset first")
+    pc_kind = _binary_kind(pc_exe)
+    if pc_kind != "windows-pe":
+        raise LinkCheckError(f"PC client {pc_exe} is not a Windows program (looks like: {pc_kind}). "
+                             "It must be a Windows build -- vendor/iperf3.exe or iperf3 on PATH; the "
+                             "extensionless vendor/iperf3 is the Android build for the headset.")
+    bin_kind = _binary_kind(headset_bin)
+    if bin_kind != "elf-aarch64":
+        raise LinkCheckError(f"headset build {headset_bin} is not an aarch64 Android binary (looks "
+                             f"like: {bin_kind}). This is the one that gets pushed to the headset.")
 
     run_dir = os.path.join(qsite.base_dir(), "runs", run_id)
     raw_dir = os.path.join(run_dir, "linkcheck")
@@ -227,7 +257,15 @@ def run_linkcheck(run_id, host, serial=None, pc_exe=None, headset_bin=None,
 
         for m in udp_mbps:
             try:
-                j = _client_json(pc_exe, host, PORT, ["-u", "-b", f"{m}M", "-t", str(seconds)],
+                # -R matters: the ramp runs headset -> PC, not PC -> headset. The Android iperf3
+                # *receive* path drops UDP packets regardless of the link (the old hand notes recorded
+                # 1-29% "loss" on the PC->Quest direction, an iperf3/Android artifact, against a TCP
+                # downlink of 1050 Mbps with zero retransmits). Confirmed live 2026-09-22: this check's
+                # PC->headset UDP at 200 Mbps reported 1.31% loss while TCP down measured 1146 Mbps with
+                # 0 retransmits. Loss and jitter are only trustworthy when the PC is the receiver, so the
+                # ramp is reversed -- which also rate-limits it to the headset's UDP *send* path
+                # (CPU-capped near 495 Mbps on this hardware), hence the achieved-vs-requested gap.
+                j = _client_json(pc_exe, host, PORT, ["-u", "-R", "-b", f"{m}M", "-t", str(seconds)],
                                  timeout=seconds + 45)
             except LinkCheckError as e:
                 progress(f"  udp {m} Mbps: failed ({e})")
@@ -245,10 +283,19 @@ def run_linkcheck(run_id, host, serial=None, pc_exe=None, headset_bin=None,
         if server_log:
             server_log.close()
 
-    lossless = [r["target_mbps"] for r in out["udp"]
+    # The knee is the highest *achieved* rate that stayed under the loss bar, not the highest requested
+    # one: with the ramp reversed the headset's send path caps out (~495 Mbps on this hardware), so a
+    # request for 1000 Mbps that delivers 495 at 0.02% loss means "lossless to 495", not "lossless to
+    # 1000" -- reporting the target would invent headroom the ramp never measured.
+    lossless = [r["mbps"] for r in out["udp"]
                 if r.get("lost_pct") is not None and r["lost_pct"] < LOSS_KNEE_MAX_PCT]
     out["udp_last_zero_loss_mbps"] = max(lossless) if lossless else None
     out["udp_knee_max_pct"] = LOSS_KNEE_MAX_PCT
+    capped = [r for r in out["udp"] if r["mbps"] < 0.8 * r["target_mbps"]]
+    if capped:
+        out["udp_rate_note"] = (f"asked for up to {max(r['target_mbps'] for r in capped)} Mbps, delivered "
+                                f"at most {max(r['mbps'] for r in capped)} Mbps -- the headset's UDP send "
+                                "path is CPU-capped, so the ramp cannot probe the link above that")
     with open(os.path.join(run_dir, "linkcheck.json"), "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=1)
     return out
@@ -277,6 +324,8 @@ def summary_lines(res):
         knee = res.get("udp_last_zero_loss_mbps")
         lines.append("lossless up to " + (f"{knee} Mbps" if knee else
                                           f"no rate tested (loss above {res.get('udp_knee_max_pct')}%)"))
+        if res.get("udp_rate_note"):
+            lines.append(res["udp_rate_note"])
     return lines
 
 
