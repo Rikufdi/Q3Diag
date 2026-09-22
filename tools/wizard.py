@@ -280,7 +280,7 @@ def ensure_streamer_running():
     launch_exe = switcher if switcher and os.path.exists(switcher) else \
         (streamer if streamer and os.path.exists(streamer) else None)
     if launch_exe:
-        ans = input(f"Launch it now ({launch_exe})? [y/n]: ").strip().lower()
+        ans = input(f"Launch it now ({launch_exe})? [y/n, default y]: ").strip().lower()
         if ans in ("", "y", "yes"):
             subprocess.Popen([launch_exe])
             print("Launched. Give it a few seconds to come up.")
@@ -396,7 +396,7 @@ def ask_and_run_linkcheck(run_id, serial):
     print("loads the same link -- so run it now, before playing, not during.")
     print("Nothing should be streaming right now (no game running in the headset).")
     try:
-        ans = input("Run the link check now? [y/n]: ").strip().lower()
+        ans = input("Run the link check now? [y/n, default n]: ").strip().lower()
     except EOFError:
         return None
     if ans not in ("y", "yes"):
@@ -443,7 +443,7 @@ def start_trace(run_id, max_seconds):
     print(f"A WPR trace writes about {gb_min:.2f} GB per minute (staged in %TEMP%, moved into the run")
     print("folder at the end), so both drives need room -- and it perturbs the session it measures.")
     try:
-        ans = input("Record a performance trace for this session (one admin prompt)? [y/n]: ").strip().lower()
+        ans = input("Record a performance trace for this session (one admin prompt)? [y/n, default n]: ").strip().lower()
     except EOFError:
         return False
     if ans not in ("y", "yes"):
@@ -668,7 +668,7 @@ def summarize(run_id):
             print(f"  - {f['metric']}: {f['baseline']} -> {f['current']} (delta {f['delta']:+})")
     print(f"Full results: runs/{run_id}/results.json")
 
-    ans = input("\nSave this run as the new baseline? [y/n]: ").strip().lower()
+    ans = input("\nSave this run as the new baseline? [y/n, default n]: ").strip().lower()
     if ans in ("y", "yes"):
         cell.fingerprint(run_id, save_baseline=True)
         print("Saved as the new baseline for this configuration.")
