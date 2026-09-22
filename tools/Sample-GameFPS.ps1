@@ -10,7 +10,7 @@
 #
 # Why this exists: every other sampler in this harness measures the HEADSET's own compositor frame rate
 # (OVR CSV, VrApi logcat) or the wireless link. None of them can see the PC GAME's own present rate --
-# the one layer findings.md calls out as an open gap.
+# the one layer every other sampler here is blind to.
 #
 # Without -TargetProcess, PresentMon captures every presenting process system-wide and
 # `presentmon_reduce()` in cell.py picks the dominant non-streamer process from the CSV afterwards --

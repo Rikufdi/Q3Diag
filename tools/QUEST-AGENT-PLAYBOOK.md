@@ -13,7 +13,7 @@ Skipping the second one is a common reason Windows never finishes enumerating th
 README "Setup" for the full first-time walkthrough.
 
 Wireless debugging then drops routinely (every headset reboot, some toggles) — that is normal, not a
-setup failure, see `findings.md`. If `adb devices`/`cell.py serial` finds nothing at all despite Windows
+setup failure. If `adb devices`/`cell.py serial` finds nothing at all despite Windows
 clearly seeing the headset in Device Manager, suspect a **stale adb server** before anything else:
 `adb kill-server` then re-run `adb devices` (auto-restarts and rescans) — this alone fixed an otherwise
 identical-looking dead-connection on 2026-09-16. Only if that doesn't surface it does it need the full
@@ -243,8 +243,8 @@ Rules that mattered in practice:
   mid-session, without losing the already-completed first segment).
   **Known gap, not yet fixed**: `decay_events()` doesn't know about these segment boundaries, so a real
   multi-minute sleep-related outage inside the window gets counted as an ordinary "decay episode"
-  indistinguishable from a benign low-motion moment (see `findings.md`, 2026-09-16 entry, for a worked
-  example telling the two apart by hand from `enc_util`/`tcp_retrans` in `decay_episodes.tsv`).
+  indistinguishable from a benign low-motion moment (telling the two apart by hand from
+  `enc_util`/`tcp_retrans` in `decay_episodes.tsv` is possible, but nothing does it automatically).
 
 ## 7a. Live dashboard, fingerprinting, and link testing (2026-09-16)
 
@@ -286,7 +286,7 @@ post-hoc reduction:
   Verified 2026-09-16 to play through the normal Windows audio path (`winsound.PlaySound`/`SND_MEMORY`),
   not the legacy `winsound.Beep()` tone generator, which was silent on this rig's audio setup.
 - **`--headset-beep`** on either command additionally calls `_alert_headset` — do not describe this as
-  an on-headset alert. It is a verified dead end (2026-09-16, see `findings.md`): this Horizon OS
+  an on-headset alert. It is a verified dead end (2026-09-16): this Horizon OS
   build's `cmd notification post` has no sound/vibration/priority flag at all, so the posted
   notification (`sound=null vibrate=null`) lands silently in the headset's notification history with no
   heads-up card. Confirmed with the headset worn and Do Not Disturb off. Keep it opt-in and only useful
@@ -295,7 +295,7 @@ post-hoc reduction:
 ## 7b. Optional PC game frame-time capture (PresentMon)
 
 Every other frame-rate sampler here (OVR CSV, VrApi logcat) measures the **headset compositor's** rate;
-none of them can see the **PC game's own** present rate — an explicit gap noted in `findings.md`. If
+none of them can see the **PC game's own** present rate — an explicit gap in the harness. If
 `presentmon_exe` is set in `tools/site.json` (get a build from
 [PresentMon](https://github.com/GameTechDev/PresentMon); not vendored, like iperf3), `monitor` launches
 `tools/Sample-GameFPS.ps1` alongside the other samplers, capturing every presenting process system-wide

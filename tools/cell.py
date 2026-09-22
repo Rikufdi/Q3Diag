@@ -323,9 +323,9 @@ def _alert(degrade):
 
 def _alert_headset(ser, degrade):
     """Posts a notification on the headset via `cmd notification post` -- NOT an audible or visible
-    alert, verified dead end as of 2026-09-16 (see findings.md "Dead end: cmd notification post..."):
-    this Horizon OS build's shell notification tool has no flag for sound/vibration/priority at all
-    (`-h` lists only -t/-i/-I/-S/-c), and the posted notification carries `sound=null vibrate=null` --
+    alert, verified dead end as of 2026-09-16: this Horizon OS build's shell notification tool has no
+    flag for sound/vibration/priority at all (`-h` lists only -t/-i/-I/-S/-c), and the posted
+    notification carries `sound=null vibrate=null` --
     confirmed with the headset worn and Do Not Disturb off: it lands in notification history only, no
     heads-up card, no sound. Kept only as a silent timestamped marker for retroactively correlating a
     degradation event with the headset's own notification log, NOT as a live alert -- do not present
@@ -1598,9 +1598,9 @@ def _presentmon_fps_stats(rows, app_col, ms_col, process_name):
 def presentmon_reduce(path, exclude_procs=("VirtualDesktop.Streamer", "svchost", "dwm", "explorer",
                                             "oculus", "OVRServer"), session=None, off=0.0,
                       target_process=None):
-    """Reduce a PresentMon capture into the PC game's own present-rate stats -- the one layer
-    findings.md calls out as invisible to every other sampler here (the headset/OVR telemetry only ever
-    sees the HEADSET compositor's frame rate). Column names vary across PresentMon versions, so this
+    """Reduce a PresentMon capture into the PC game's own present-rate stats -- the one layer every
+    other sampler here is blind to (the headset/OVR telemetry only ever sees the HEADSET compositor's
+    frame rate). Column names vary across PresentMon versions, so this
     reads whichever known variant is present rather than assuming one schema.
 
     `target_process` (an exact image name, e.g. "hlvr.exe") comes from a run whose PresentMon capture
@@ -2179,9 +2179,9 @@ PRIVATE_RUN_PREFIX = "priv_"
 def is_private_run(run_id):
     """A run_id starting with `priv_` (e.g. priv_ram3600_..., matched via `runs/priv_*/` in .gitignore)
     is this rig's own scratch/sanity-check data, not part of the published dataset -- results()/passive()
-    skip appending its row to the shared, git-tracked results.csv so it can never end up committed by
-    forgetting a manual step. results.json still gets written inside the (gitignored) run directory, so
-    fingerprint/dashboard/local inspection all still work; only the row in the tracked CSV is skipped."""
+    skip appending its row to the shared results.csv so it can never end up committed by forgetting a
+    manual step. results.json still gets written inside the (gitignored) run directory, so
+    fingerprint/dashboard/local inspection all still work; only the row in the shared CSV is skipped."""
     return run_id.startswith(PRIVATE_RUN_PREFIX)
 
 
