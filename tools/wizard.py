@@ -618,9 +618,17 @@ def run_session(run_id, max_seconds, presentmon_hint=None, presentmon_capture=Tr
     # and draining after means anything pressed in this window is discarded instead of stopping the
     # run; a deliberate Enter later still works normally.
     ARM_DELAY_S = 8
-    print(f"   (stop key arms in {ARM_DELAY_S}s -- ignore anything you press before then)")
+    print(f"   (stop key arms in {ARM_DELAY_S}s -- anything you press before then is discarded)")
     time.sleep(ARM_DELAY_S)
     drained = _drain_stdin()
+    # Say what happened to the arm window. The drain above is deliberate, but a silently swallowed
+    # keystroke is indistinguishable from a stop key that does not work -- which is exactly how it got
+    # reported: Enter pressed during the window, session still running, Ctrl+C the only way out (a
+    # signal, so the drain never sees it). Naming the discard, and the moment the key goes live, means
+    # the operator knows to press again instead of concluding the tool is broken.
+    print("   Stop key armed"
+          + (f" -- {drained} earlier keypress(es) discarded, press Enter again to stop." if drained
+             else "."))
     t_session_start = time.time()
     stop_reason = "key"
     try:

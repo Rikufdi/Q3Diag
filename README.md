@@ -68,7 +68,9 @@ much has landed on disk so far.
 7. **Optional: record a Windows Performance Recorder trace** (one admin prompt). Off by default;
    see the size warning below before saying yes.
 8. **Play.** Press **Enter** when you're done — deliberately not `q` — and the wizard stops cleanly,
-   crunches the numbers, and prints a plain verdict.
+   crunches the numbers, and prints a plain verdict. The first ~8 seconds of a session ignore the
+   stop key, so a reflexively-pressed Enter can't end the run by accident; the wizard says when the
+   key is armed, and `Ctrl+C` always stops immediately.
 
 ```
 Verdict: consistent with the saved baseline -- no metric drifted beyond its threshold.
