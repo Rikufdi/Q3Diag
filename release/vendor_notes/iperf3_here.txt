@@ -1,0 +1,50 @@
+iperf3 is not bundled, but the tool can drive it - two builds go here.
+=====================================================================
+
+What it is for: measuring the raw PC <-> headset link with no video running, so a session that
+reads badly can be told apart from a radio that simply cannot carry the bitrate. The wizard
+offers that check before a session starts - TCP down and up, then a UDP ramp - but only when
+BOTH halves below are present. The check is the only thing in the tool that uses iperf3.
+
+How this was set up on the machine the tool was written on:
+
+1. PC side. One command, nothing to copy across:
+
+     winget install ar51an.iPerf3
+
+   That installs iperf3 3.21 and puts iperf3.exe on PATH, which the tool searches. scoop/choco
+   or your own build work too, as does dropping the exe in here as vendor\iperf3.exe, or
+   setting iperf3_exe in site.json.
+
+2. Headset side. This is the awkward half: the headset runs the *server*, so it needs an
+   aarch64 Android build. In order of least effort:
+
+   a. Build it. Upstream ships SOURCE ONLY - every asset on
+      https://github.com/esnet/iperf/releases is a .tar.gz, there is no official Android or
+      Windows binary -- so a headset build means cross-compiling for aarch64-linux-android
+      with the Android NDK (the tarball's ./configure plus the NDK's clang wrappers, which
+      needs a POSIX shell: MSYS2 or WSL).
+
+   b. If an iperf3 server has ever been run on this headset, take that build back out instead of
+      making a new one -- /data/local/tmp is where such things get staged:
+
+        adb shell ls -l /data/local/tmp/iperf3
+        adb pull /data/local/tmp/iperf3 vendor/iperf3
+
+   c. A prebuilt binary from somewhere else works as well, but better to build yourself if
+      possible.
+
+   Name the file exactly vendor\iperf3: no extension, and uncompressed. Nothing here will
+   unpack an archive into a path it then executes; that is the user's job on purpose.
+
+   Once the link check has run, the tool leaves the build at /data/local/tmp/iperf3 and skips
+   re-pushing it while the size matches -- so a copy dropped or lost later can always be pulled
+   back with the step (b) commands.
+
+The errors usually say which half is wrong: a build for the wrong architecture is reported as
+"not an aarch64 Android binary", or as "server exited immediately" if it only turns out to be
+wrong once the headset tries to run it. And if only the TCP *uplink* test fails, the reverse
+(-R) connection back to this PC is being blocked - a firewall is the first suspect; the
+downlink still measures correctly without it.
+
+If either half is missing, the link check is simply not offered and nothing else changes.

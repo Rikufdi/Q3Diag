@@ -28,9 +28,9 @@ auto-detects a copy placed next to the exe (drop in PresentMon.exe yourself -- s
 qsite.presentmon_exe() and the startup message monitor() prints when it's missing) without needing
 site.json edited.
 
-Nothing under release/ except this script, release/README.md and release/version_info.txt is meant
-to be committed -- release/build/ (scratch: downloaded platform-tools) and release/dist/ (the
-output) are both git-ignored and fully regenerable by re-running this script.
+Nothing under release/ except this script, release/README.md, release/version_info.txt and
+release/vendor_notes/ is meant to be committed -- release/build/ (scratch: downloaded platform-tools)
+and release/dist/ (the output) are both git-ignored and fully regenerable by re-running this script.
 
 Requires: `pip install pyinstaller` (done automatically below if missing), and internet access for
 the one-time platform-tools download (cached in release/build/ after that). Windows only, same as
@@ -66,91 +66,13 @@ DATA_FILES = ("Sample-Quest.ps1", "Sample-PC.ps1", "Sample-GameFPS.ps1", "Quest-
 # release's vendor/ folder (regenerated on every build -- vendor/ is not user state, so anything
 # dropped there is NOT preserved across rebuilds; a dev's own copy belongs in tools/vendor/, which
 # site.json points at). PresentMon is auto-detected from here by qsite.presentmon_exe(); iperf3 is
-# called by no code path at all, which its note says outright rather than implying the tool uses it.
-VENDOR_NOTES = {
-    "presentmon_here.txt": """\
-PresentMon is not bundled -- download it yourself.
-==================================================
-
-1. Get the console-app build (e.g. PresentMon-2.5.1-x64.exe) from:
-
-     https://github.com/GameTechDev/PresentMon/releases/latest
-
-2. Rename it to exactly  PresentMon.exe  and drop it in this folder, so you end up with:
-
-     vendor\\PresentMon.exe
-
-That is all. The wizard auto-detects it on the next run -- session setup will say
-"PresentMon found: ..." -- and then offers optional PC-side frame-rate capture for the game
-itself, as opposed to the headset compositor's frame rate that every other sampler sees.
-
-You can also leave this folder alone and point the tool at a build kept anywhere else, by
-setting "presentmon_exe" in site.json (or exporting QUEST3_PRESENTMON_EXE). A real install
-wins over this folder.
-
-Why it is not included: PresentMon is MIT-licensed and free to redistribute, but every extra
-executable in this download makes antivirus tools more likely to flag it as suspicious.
-""",
-    "iperf3_here.txt": """\
-iperf3 is not bundled, but the tool can drive it -- two builds go here.
-=====================================================================
-
-What it is for: measuring the raw PC <-> headset link with no video running, so a session that
-reads badly can be told apart from a radio that simply cannot carry the bitrate. The wizard
-offers that check before a session starts -- TCP down and up, then a UDP ramp -- but only when
-BOTH halves below are present. The check is the only thing in the tool that uses iperf3.
-
-How this was set up on the machine the tool was written on:
-
-1. PC side. One command, nothing to copy across:
-
-     winget install ar51an.iPerf3
-
-   That installs iperf3 3.21 and puts iperf3.exe on PATH, which the tool searches. scoop/choco
-   or your own build work too, as does dropping the exe in here as vendor\\iperf3.exe, or
-   setting iperf3_exe in site.json.
-
-2. Headset side. This is the awkward half: the headset runs the *server*, so it needs an
-   aarch64 Android build. In order of least effort:
-
-   a. If an iperf3 server has ever been run on this headset, take that build back out instead of
-      making a new one -- /data/local/tmp is where such things get staged:
-
-        adb shell ls -l /data/local/tmp/iperf3
-        adb pull /data/local/tmp/iperf3 vendor/iperf3
-
-      That is how the copy on this rig was recovered: 133,600 bytes of aarch64, pushed by hand
-      during the original baseline measurements on 2026-09-15 at 17:15 -- four minutes before
-      the first recorded test. A headset does NOT come with this: nothing about a Quest ships
-      iperf3, and on one that has never been set up this step simply finds nothing, so go to (b).
-
-      No adb on PATH? The release bundles one at _internal\\adb.exe.
-
-   b. Otherwise build it. Upstream ships SOURCE ONLY -- every asset on
-      https://github.com/esnet/iperf/releases is a .tar.gz, there is no official Android or
-      Windows binary -- so a headset build means cross-compiling for aarch64-linux-android
-      with the Android NDK (the tarball's ./configure plus the NDK's clang wrappers, which
-      needs a POSIX shell: MSYS2 or WSL).
-
-   c. A prebuilt binary from somewhere else works as well, but that is your call -- you are
-      about to run it on your headset as a server.
-
-   Name the file exactly vendor\\iperf3: no extension, and uncompressed. Nothing here will
-   unpack an archive into a path it then executes; that is the user's job on purpose.
-
-   Once the link check has run, the tool leaves the build at /data/local/tmp/iperf3 and skips
-   re-pushing it while the size matches -- so a copy dropped or lost later can always be pulled
-   back with the step (a) commands.
-
-The errors usually say which half is wrong: a build for the wrong architecture is reported as
-"not an aarch64 Android binary", or as "server exited immediately" if it only turns out to be
-wrong once the headset tries to run it. And if only the TCP *uplink* test fails, the reverse
-(-R) connection back to this PC is being blocked -- a firewall is the first suspect; the
-downlink still measures correctly without it.
-
-If either half is missing, the link check is simply not offered and nothing else changes.
-""",
-}
+# used only by the link check (tools/linkcheck.py), which its note says rather than implying more.
+#
+# Kept as real .txt files rather than Python string literals: they are the documentation a user reads
+# and edits, so they belong in a file that can be edited and diffed as text -- no backslash escaping
+# to get wrong, no re-encoding when the wording changes.
+VENDOR_NOTES_DIR = os.path.join(RELEASE_DIR, "vendor_notes")
+VENDOR_NOTES = ("presentmon_here.txt", "iperf3_here.txt")
 
 
 def ensure_pyinstaller():
@@ -341,11 +263,17 @@ def copy_extras():
         shot_dir = os.path.join(app_dir, "docs")
         os.makedirs(shot_dir, exist_ok=True)
         shutil.copy2(shot, os.path.join(shot_dir, "dashboard.jpg"))
-    # vendor/ = where the user drops PresentMon (and optionally iperf3) themselves. Written rather
-    # than copied from the repo so it exists even in a fresh checkout, and regenerated on every build.
+    # vendor/ = where the user drops PresentMon (and optionally iperf3) themselves. The notes are
+    # copied from release/vendor_notes/ and written with CRLF, so the shipped files read correctly in
+    # Notepad whatever the repo's line endings are. Regenerated on every build.
     vendor_dir = os.path.join(app_dir, "vendor")
     os.makedirs(vendor_dir, exist_ok=True)
-    for name, text in VENDOR_NOTES.items():
+    for name in VENDOR_NOTES:
+        src = os.path.join(VENDOR_NOTES_DIR, name)
+        if not os.path.exists(src):
+            raise SystemExit(f"missing vendor note: {src}")
+        with open(src, encoding="utf-8") as fh:
+            text = fh.read()
         with open(os.path.join(vendor_dir, name), "w", encoding="utf-8", newline="\r\n") as fh:
             fh.write(text)
 

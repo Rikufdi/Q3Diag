@@ -1,0 +1,21 @@
+PresentMon is not bundled -- download it yourself.
+==================================================
+
+1. Get the console-app build (e.g. PresentMon-2.5.1-x64.exe) from:
+
+     https://github.com/GameTechDev/PresentMon/releases/latest
+
+2. Rename it to exactly  PresentMon.exe  and drop it in this folder, so you end up with:
+
+     vendor\PresentMon.exe
+
+That is all. The wizard auto-detects it on the next run -- session setup will say
+"PresentMon found: ..." -- and then offers optional PC-side frame-rate capture for the game
+itself, as opposed to the headset compositor's frame rate that every other sampler sees.
+
+You can also leave this folder alone and point the tool at a build kept anywhere else, by
+setting "presentmon_exe" in site.json (or exporting QUEST3_PRESENTMON_EXE). A real install
+wins over this folder.
+
+Why it is not included: PresentMon is MIT-licensed and free to redistribute, but every extra
+executable in this download makes antivirus tools more likely to flag it as suspicious.
