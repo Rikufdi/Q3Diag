@@ -61,9 +61,33 @@ def _print_header(title):
 
 
 def ask(prompt, default=None):
-    suffix = f" [{default}]" if default is not None else ""
+    suffix = f" [{default}]" if default else ""
+    print()
     val = input(f"{prompt}{suffix}: ").strip()
+    print()
     return val or default
+
+
+def ask_yes_no(prompt, default="n"):
+    """Yes/no prompt with the default spelled out, and blank lines above and below so the question
+    reads as its own step instead of crowding the text that explains it.
+
+    EOFError is deliberately left to the caller: each site has its own idea of what closed stdin
+    means (skip the optional step, or propagate to main()'s handler)."""
+    print()
+    ans = input(f"{prompt} [y/n, default {default}]: ").strip().lower()
+    print()
+    if not ans:
+        return default == "y"
+    return ans in ("y", "yes")
+
+
+def _pause(text):
+    """Enter-to-continue, spaced like ask_yes_no -- these are decision points too, and the text
+    around them should not run straight into the prompt."""
+    print()
+    input(text)
+    print()
 
 
 def ask_int(prompt, default):
@@ -76,7 +100,9 @@ def ask_int(prompt, default):
     than guessing wrong. EOFError (genuinely no input left, e.g. non-interactive stdin) is left to
     propagate to main()'s top-level handler rather than looping forever against a closed stream."""
     while True:
+        print()
         raw = input(f"{prompt} [{default}]: ").strip()
+        print()
         if not raw:
             return default
         try:
@@ -93,6 +119,7 @@ def choose(prompt, options, default=None, allow_other=False):
     through to whichever branch the caller treats as the non-default case, which was a confusing
     dead end, not a real option."""
     default = default or options[0]
+    print()
     print(prompt)
     for i, opt in enumerate(options, 1):
         marker = " (default)" if opt == default else ""
@@ -101,6 +128,7 @@ def choose(prompt, options, default=None, allow_other=False):
     if allow_other:
         print(f"  {len(options) + 1}. other (type your own)")
     raw = input(f"choice [1-{n_opts}, or Enter for default]: ").strip()
+    print()
     if not raw:
         return default
     if raw.isdigit():
@@ -153,7 +181,7 @@ def ensure_headset_connected(usb_timeout_s=90):
 
     print("Headset not reachable over Wi-Fi.")
     print("Plug it into this PC with a USB-C cable now (put the headset on if it's asleep).")
-    input("Press Enter once it's plugged in... ")
+    _pause("Press Enter once it's plugged in... ")
     print("Waiting for it to show up over USB (accept any 'Allow USB debugging?' prompt in the headset)...")
     deadline = time.time() + usb_timeout_s
     serial = None
@@ -265,7 +293,8 @@ def quick_session():
     _write_settings(run_id, {"run_id": run_id, "stack": "auto", "codec": "auto",
                               "bitrate_mbps": "auto", "content": "auto", "band": "auto",
                               "bt": cell.detect_bluetooth() or "unknown"})
-    print("Quick Test: no setup questions -- just play normally, press Enter when you're done.")
+    _print_header("Quick Test")
+    print("No setup questions -- just play normally, press Enter when you're done.")
     return run_id
 
 
@@ -280,11 +309,10 @@ def ensure_streamer_running():
     launch_exe = switcher if switcher and os.path.exists(switcher) else \
         (streamer if streamer and os.path.exists(streamer) else None)
     if launch_exe:
-        ans = input(f"Launch it now ({launch_exe})? [y/n, default y]: ").strip().lower()
-        if ans in ("", "y", "yes"):
+        if ask_yes_no(f"Launch it now ({launch_exe})?", default="y"):
             subprocess.Popen([launch_exe])
             print("Launched. Give it a few seconds to come up.")
-    input("Once your streaming stack is running and ready, press Enter to continue... ")
+    _pause("Once your streaming stack is running and ready, press Enter to continue... ")
 
 
 def _free_port(preferred):
@@ -396,10 +424,10 @@ def ask_and_run_linkcheck(run_id, serial):
     print("loads the same link -- so run it now, before playing, not during.")
     print("Nothing should be streaming right now (no game running in the headset).")
     try:
-        ans = input("Run the link check now? [y/n, default n]: ").strip().lower()
+        go = ask_yes_no("Run the link check now?")
     except EOFError:
         return None
-    if ans not in ("y", "yes"):
+    if not go:
         return None
 
     # Aim the UDP half at this session's own bitrate when there is one -- that is the question worth
@@ -443,10 +471,10 @@ def start_trace(run_id, max_seconds):
     print(f"A WPR trace writes about {gb_min:.2f} GB per minute (staged in %TEMP%, moved into the run")
     print("folder at the end), so both drives need room -- and it perturbs the session it measures.")
     try:
-        ans = input("Record a performance trace for this session (one admin prompt)? [y/n, default n]: ").strip().lower()
+        go = ask_yes_no("Record a performance trace for this session (one admin prompt)?")
     except EOFError:
         return False
-    if ans not in ("y", "yes"):
+    if not go:
         return False
 
     run_dir = os.path.join(BASE, "runs", run_id)
@@ -596,7 +624,7 @@ def run_session(run_id, max_seconds, presentmon_hint=None, presentmon_capture=Tr
     t_session_start = time.time()
     stop_reason = "key"
     try:
-        input("Press Enter when you're done playing to stop and reduce the session... ")
+        _pause("Press Enter when you're done playing to stop and reduce the session... ")
     except KeyboardInterrupt:
         stop_reason = "ctrl+c"
         print("\n(Ctrl+C) stopping...")
@@ -668,8 +696,7 @@ def summarize(run_id):
             print(f"  - {f['metric']}: {f['baseline']} -> {f['current']} (delta {f['delta']:+})")
     print(f"Full results: runs/{run_id}/results.json")
 
-    ans = input("\nSave this run as the new baseline? [y/n, default n]: ").strip().lower()
-    if ans in ("y", "yes"):
+    if ask_yes_no("Save this run as the new baseline?"):
         cell.fingerprint(run_id, save_baseline=True)
         print("Saved as the new baseline for this configuration.")
 
