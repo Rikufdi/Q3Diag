@@ -25,14 +25,12 @@ tools/elev-do-res.txt
 tools/elev-setup-log.txt
 tools/*.log
 
-# Raw adb device dumps: regenerate with tools/Quest-Probe.ps1. They carry the
-# headset serial/MACs and neighbors' SSIDs/BSSIDs from scan lists.
-probe/**/raw/
-probe/**/*-raw/
-
-# Local agent write-up from a probe session, like handoff.md: dev-side notes rather than a published
-# measurement (the probe's own SUMMARY.md/index.json stay tracked alongside the other probe dirs).
-probe/2026-09-20-110528/agent-ethernet.md
+# Device probe output (tools/Quest-Probe.ps1): the raw adb dumps, the SUMMARY.md/index.json
+# roll-ups, and the agent write-ups under probe/<ts>/. It is a capture of one headset's state rather
+# than anything about the tool, so none of it ships -- and it was purged from history too. Regenerate
+# with Quest-Probe.ps1 when needed; conclusions belong in the playbook, not in a tracked copy of the
+# device's own output.
+/probe/
 
 # AP administration screenshot with the Wi-Fi passphrase rendered in plaintext.
 topology/ap-radio.png
