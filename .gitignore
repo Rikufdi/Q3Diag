@@ -51,6 +51,13 @@ docs/quest3-bt-wifi-coexistence-report.md
 # tree stays the tool plus its documented measurements, rather than a moving list of what is next.
 handoff.md
 
+# The author's own running write-ups and aggregate measurement table. Root-anchored on purpose: the
+# same names inside runs/ (e.g. analyze.py's `report <runs_dir>` output) are separate, regenerable
+# files. Purged from history too -- see the "Keep local write-ups out of the published tree" commit.
+/findings.md
+/report.md
+/results.csv
+
 # Third-party aarch64 Android build of iperf3 (BSD-3-Clause). Fetch or build your own.
 tools/iperf3.*
 
