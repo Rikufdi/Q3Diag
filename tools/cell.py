@@ -2441,6 +2441,20 @@ def results(run_id, overlay_path=None):
             res["quest_session_min"] = (round((sess["end_dev_s"] - sess["start_dev_s"]) / 60, 1) if sess.get("end_dev_s")
                                         else round(res.get("vr_api_lines", 0) / 60, 1) or None)
 
+    # Optional pre-session iperf3 link check (see linkcheck.py): carry the headline numbers into the
+    # run's results.json, so a session records the capacity of the link it was measured on. Deliberately
+    # not a MEAS_COLS entry -- this lands in results.json only, leaving the results.csv schema alone.
+    lc_path = os.path.join(run_dir, "linkcheck.json")
+    if os.path.exists(lc_path):
+        try:
+            lc = json.load(open(lc_path, encoding="utf-8"))
+            res["linkcheck_tcp_down_mbps"] = lc.get("tcp_down_mbps")
+            res["linkcheck_tcp_down_retransmits"] = lc.get("tcp_down_retransmits")
+            res["linkcheck_tcp_up_mbps"] = lc.get("tcp_up_mbps")
+            res["linkcheck_udp_last_zero_loss_mbps"] = lc.get("udp_last_zero_loss_mbps")
+        except (OSError, ValueError):
+            pass
+
     json.dump(res, open(os.path.join(run_dir, "results.json"), "w"), indent=1)
 
     s = json.load(open(os.path.join(run_dir, "settings.json")))

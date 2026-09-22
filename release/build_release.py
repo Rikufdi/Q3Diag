@@ -16,8 +16,8 @@ release/dist/Q3Diag-Wizard-<version>-win64.zip) containing:
   THIRD_PARTY_NOTICES.md, LICENSE, LICENSE-DATA, README.md   copied in as-is
   docs/dashboard.jpg         the dashboard screenshot the README embeds (not local-only docs/)
   vendor/                    placeholders for the tools you supply yourself: drop PresentMon.exe
-                              here and the wizard auto-detects it; iperf3 is listed too, though no
-                              code path calls it (see each *_here.txt)
+                              here and the wizard auto-detects it; drop iperf3.exe plus an aarch64
+                              iperf3 and it offers its link-capacity check (see each *_here.txt)
 
 adb is the only third-party binary bundled -- it's load-bearing (nothing works without talking to
 the headset). PresentMon and iperf3 deliberately are not, even though both are used elsewhere in
@@ -92,26 +92,34 @@ Why it is not included: PresentMon is MIT-licensed and free to redistribute, but
 executable in this download makes antivirus tools more likely to flag it as suspicious.
 """,
     "iperf3_here.txt": """\
-iperf3 is not bundled -- and nothing in this tool runs it for you.
-===============================================================
+iperf3 is not bundled, but the tool can drive it -- two builds go here.
+=====================================================================
 
-There is no iperf3 code path in this harness: neither the wizard nor cell.py will ever launch
-it. This folder is only somewhere to keep a copy if you want to take your own throughput
-measurements alongside a session.
+What it is for: measuring the raw PC <-> headset link with no video running, so a session that
+reads badly can be told apart from a radio that simply cannot carry the bitrate. The wizard
+offers that check before a session starts -- TCP down and up, then a UDP ramp -- but only when
+BOTH halves below are present. The check is the only thing in the tool that uses iperf3.
 
-1. Get a build -- a Windows .exe, or the matching Android/aarch64 binary for the headset:
-
-     https://software.es.net/iperf/
-
-   (or your own package manager)
-
-2. Place it in this folder, e.g.
+1. The PC client -- the ordinary Windows build:
 
      vendor\\iperf3.exe
 
-Why it is not included: the same reason as PresentMon -- extra executables make antivirus
-tools more likely to flag the download, and this one is not needed even for the optional
-features.
+   Or just install iperf3 from winget/scoop and leave this folder alone: PATH is searched too,
+   and a real install wins over this folder.
+
+2. The headset build -- an aarch64 Android binary, pushed to /data/local/tmp and run as the
+   server there (the headset has to be the server; that is the link we want to measure):
+
+     vendor\\iperf3
+
+   Uncompressed, please -- not .gz/.zip. Nothing here will unpack a downloaded archive into a
+   path it then executes, which is deliberately the user's job.
+
+Get builds from https://software.es.net/iperf/ -- the PC side from your package manager, and
+the Android side usually means building it yourself with the NDK. A build for the wrong
+architecture is reported clearly ("server exited immediately"), not silently ignored.
+
+If either half is missing, the link check is simply not offered and nothing else changes.
 """,
 }
 

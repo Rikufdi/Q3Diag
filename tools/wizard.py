@@ -40,6 +40,7 @@ import time
 
 import qsite
 import cell
+import linkcheck
 import dashboard
 
 ADB = qsite.path("adb")
@@ -355,6 +356,69 @@ def ask_presentmon_hint(run_id):
     return "" if raw.lower() == "all" else raw   # "" -> capture, system-wide (no hint to match)
 
 
+def _run_target_bitrate(run_id):
+    """The run's configured bitrate, or None for a Quick Test ("auto"). Used to aim the UDP half of
+    the link check at the rate this session will actually ask the link to carry."""
+    try:
+        bitrate = json.load(open(os.path.join(BASE, "runs", run_id, "settings.json"))).get("bitrate_mbps")
+    except (OSError, ValueError):
+        return None
+    return bitrate if isinstance(bitrate, int) else None
+
+
+def ask_and_run_linkcheck(run_id, serial):
+    """Offer the optional pre-session iperf3 link check -- see linkcheck.py for what it answers and
+    why it has to run before the stream does.
+
+    Only offered when BOTH halves of iperf3 are present, because it cannot run with one: the PC client
+    and the aarch64 build the headset runs as the server. When only the PC client is there that is
+    worth saying out loud -- a winget/scoop install gets you that far and the missing piece is the one
+    nobody expects -- while when neither is present this stays quiet: the README and the release's
+    vendor/iperf3_here.txt are where "you could also measure the link" belongs, not a line printed on
+    every single run.
+
+    A failure here never blocks the session: any LinkCheckError is reported and swallowed, because a
+    link check that could not run says nothing about whether the session can.
+    """
+    exe, headset_bin = qsite.iperf3_exe(), qsite.iperf3_android()
+    if not exe and not headset_bin:
+        return None
+    if not (exe and headset_bin):
+        missing = ("the headset build (an aarch64 binary named 'iperf3' in vendor/, or iperf3_android)"
+                   if exe else "the PC client (vendor/iperf3.exe, or iperf3 on PATH)")
+        print(f"\n(link check skipped: it also needs {missing} -- see vendor/iperf3_here.txt)")
+        return None
+
+    _print_header("Link capacity check (optional)")
+    print("Measures the raw PC <-> headset link with no video running, so a session that reads badly")
+    print("can be told apart from a radio that cannot carry the bitrate. Takes about a minute, and it")
+    print("loads the same link -- so run it now, before playing, not during.")
+    print("Nothing should be streaming right now (no game running in the headset).")
+    try:
+        ans = input("Run the link check now? [y/N]: ").strip().lower()
+    except EOFError:
+        return None
+    if ans not in ("y", "yes"):
+        return None
+
+    # Aim the UDP half at this session's own bitrate when there is one -- that is the question worth
+    # answering -- plus one step above it for headroom; a Quick Test has no target, so use the ramp the
+    # original characterisation used.
+    target = _run_target_bitrate(run_id)
+    rates = sorted({target, int(target * 1.5)}) if target else [200, 500, 1000]
+    host = serial.split(":")[0] if serial and ":" in serial else (qsite.get("quest_ip") or "")
+    try:
+        res = linkcheck.run_linkcheck(run_id, host, serial=serial, pc_exe=exe, headset_bin=headset_bin,
+                                      udp_mbps=rates, progress=print)
+    except linkcheck.LinkCheckError as e:
+        print(f"  link check failed: {e}")
+        print("  (continuing without it -- the session itself is unaffected)")
+        return None
+    linkcheck.print_summary(res)
+    print(f"  Raw results: runs/{run_id}/linkcheck.json")
+    return res
+
+
 def start_trace(run_id, max_seconds):
     """Offer to record a Windows Performance Recorder trace for this session, and start it.
 
@@ -572,6 +636,12 @@ def summarize(run_id):
     _print_header("Results")
     stack, band = _detect_stack_and_band(run_id)
     print(f"Detected: stack={stack} band={band} (codec stays 'auto' -- not readable from the headset)")
+    lc_path = os.path.join(BASE, "runs", run_id, "linkcheck.json")
+    if os.path.exists(lc_path):
+        try:
+            linkcheck.print_summary(json.load(open(lc_path, encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
     cell.results(run_id)
     res_path = os.path.join(BASE, "runs", run_id, "results.json")
     if os.path.exists(res_path):
@@ -611,11 +681,12 @@ def main():
             default="Quick Test -- just run and measure, no setup questions")
         quick = mode.startswith("Quick")
 
-        ensure_headset_connected()
+        serial = ensure_headset_connected()
         ensure_streamer_running()
         run_id = quick_session() if quick else configure_session()
         presentmon_hint = ask_presentmon_hint(run_id)
         max_minutes = ask_int("Max session length, in minutes (you can stop earlier)", 60)
+        ask_and_run_linkcheck(run_id, serial)
         tracing = start_trace(run_id, max_minutes * 60)
         _print_data_footprint(run_id, max_minutes,
                               presentmon=(presentmon_hint is not None), trace=tracing)

@@ -99,6 +99,11 @@ DEFAULTS = {
     # vendor/ (see presentmon_exe()) -- empty means "skip PC game-fps capture".
     "presentmon_exe": "",
     "presentmon_args": "",
+    # Optional: link-capacity check (tools/linkcheck.py). iperf3_exe is the Windows client (empty =
+    # vendor/ then PATH); iperf3_android is the aarch64 build pushed to the headset as the server.
+    # Neither is vendored -- empty means "don't offer the check".
+    "iperf3_exe": "",
+    "iperf3_android": "",
     # Optional: tools/dashboard.py listen port.
     "dashboard_port": 8765,
 }
@@ -193,6 +198,39 @@ def presentmon_exe():
         return configured
     for candidate in (os.path.join(VENDOR_DIR, "PresentMon.exe"),
                       os.path.join(TOOLS_DIR, "PresentMon.exe")):
+        if exists(candidate):
+            return candidate
+    return None
+
+
+def iperf3_exe():
+    """PC-side iperf3 client for the optional link check (linkcheck.py). Optional like
+    presentmon_exe(): None when there is nothing to find, and the wizard simply does not offer the
+    check. Checks site.json/QUEST3_IPERF3_EXE first, then vendor/ -- where the release's note file
+    tells you to drop it -- then PATH, so a winget/scoop install works with no config at all."""
+    configured = get("iperf3_exe")
+    if configured:
+        return configured
+    for name in ("iperf3.exe", "iperf3"):
+        candidate = os.path.join(VENDOR_DIR, name)
+        if exists(candidate):
+            return candidate
+    return shutil.which("iperf3")
+
+
+def iperf3_android():
+    """The aarch64 Android iperf3 that gets pushed to the headset: the headset has to run the *server*
+    end, since that is the side whose link we want to characterise and the only arrangement that
+    needs no inbound allowance on the PC. Optional; the link check needs this AND iperf3_exe().
+
+    Uncompressed only, and deliberately not auto-decompressed: these builds ship as .gz/.zip, and
+    silently unpacking a downloaded archive into a path we then execute is a worse habit than asking
+    the user to unpack it. Names tried: iperf3, iperf3-aarch64, iperf3-arm64."""
+    configured = get("iperf3_android")
+    if configured:
+        return configured
+    for name in ("iperf3", "iperf3-aarch64", "iperf3-arm64"):
+        candidate = os.path.join(VENDOR_DIR, name)
         if exists(candidate):
             return candidate
     return None

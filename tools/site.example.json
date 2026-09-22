@@ -24,5 +24,9 @@
   "presentmon_exe": "",
   "presentmon_args": "",
 
+  "_iperf3_comment": "Optional link-capacity check (see tools/linkcheck.py): measures the raw PC<->headset link with iperf3 before a session, so a bad session can be attributed to the radio or to the encoder. Needs TWO builds, both user-supplied and not vendored: iperf3_exe = the ordinary Windows client (or just install it from winget/scoop and leave this empty -- PATH is searched); iperf3_android = the aarch64 Android build that gets pushed to the headset to act as the server. Leave either empty and the check is simply not offered.",
+  "iperf3_exe": "",
+  "iperf3_android": "",
+
   "dashboard_port": 8765
 }

@@ -61,9 +61,13 @@ much has landed on disk so far.
    actually launch it — it does not need to be running yet. `all` captures every presenting process;
    blank genuinely skips PC-side capture.
 5. **Set a max session length** in minutes. It stops by itself at that point if you forget to.
-6. **Optional: record a Windows Performance Recorder trace** (one admin prompt). Off by default;
+6. **Optional: link-capacity check (iperf3).** Offered when both halves of iperf3 are present (see
+   *Optional extra capture*). It measures the raw PC↔headset link with nothing streaming — TCP both
+   ways, then a UDP ramp — so a session that reads badly can be told apart from a radio that cannot
+   carry the bitrate. It takes about a minute and loads the same link, so it runs now, before play.
+7. **Optional: record a Windows Performance Recorder trace** (one admin prompt). Off by default;
    see the size warning below before saying yes.
-7. **Play.** Press **Enter** when you're done — deliberately not `q` — and the wizard stops cleanly,
+8. **Play.** Press **Enter** when you're done — deliberately not `q` — and the wizard stops cleanly,
    crunches the numbers, and prints a plain verdict.
 
 ```
@@ -125,8 +129,11 @@ Neither of these is bundled; both are optional and only used if you point the to
   `PresentMon.exe`, and drop it in the release's **`vendor/`** folder — the wizard auto-detects it and
   says `PresentMon found: …` during session setup. A release ships `vendor/presentmon_here.txt` with
   the same instructions. Alternatively set `presentmon_exe` in `site.json` to a path anywhere.
-- **iperf3** — not called by any part of the tool. `vendor/iperf3_here.txt` is just a place to keep a
-  copy if you want to run your own throughput measurements alongside a session.
+- **iperf3** — used by the optional link-capacity check, and by nothing else. It needs **two** builds:
+  the Windows client (`vendor/iperf3.exe`, or just install iperf3 from winget/scoop — PATH is
+  searched) and an aarch64 Android build (`vendor/iperf3`) that gets pushed to the headset and run
+  there as the server. A release ships `vendor/iperf3_here.txt` with the same instructions; with
+  either half missing the check is simply not offered.
 
 ## Troubleshooting
 
