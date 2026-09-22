@@ -144,5 +144,5 @@ or a paid signing certificate reliably clears it.
 ## License
 
 - **Code** (`tools/**`) is **MIT** — see [`LICENSE`](LICENSE).
-- **Data and write-ups** are **CC BY 4.0** — see [`LICENSE-DATA`](LICENSE-DATA) and
-  [`docs/RESEARCH.md`](docs/RESEARCH.md) for the details and attribution.
+- **Data and write-ups** are **CC BY 4.0** — see [`LICENSE-DATA`](LICENSE-DATA) for the details and
+  attribution.

@@ -46,6 +46,10 @@ docs/quest3-bt-wifi-coexistence-report.md
 # tree stays the tool plus its documented measurements, rather than a moving list of what is next.
 handoff.md
 
+# The methodology write-up. Kept local like handoff.md: the published tree is the harness and its
+# reference materials, not the research narrative. Purged from history too.
+/docs/RESEARCH.md
+
 # The author's own running write-ups and aggregate measurement table. Root-anchored on purpose: the
 # same names inside runs/ (e.g. analyze.py's `report <runs_dir>` output) are separate, regenerable
 # files. Purged from history too -- see the "Keep local write-ups out of the published tree" commit.

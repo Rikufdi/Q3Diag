@@ -18,11 +18,11 @@ release/dist/Q3Diag-Wizard-<version>-win64.zip) containing:
 adb is the only third-party binary bundled -- it's load-bearing (nothing works without talking to
 the headset). PresentMon and iperf3 deliberately are not, even though both are used elsewhere in
 this project: neither is needed for full use of the tool (PresentMon is an optional PC-side fps
-enhancement; iperf3 isn't wired into any code path at all, purely a manual advanced/research recipe
-in docs/RESEARCH.md), so they're not worth the extra binaries in a release that's already working to
-avoid antivirus false positives on adb alone. PresentMon still auto-detects a copy placed next to the
-exe (drop in PresentMon.exe yourself -- see qsite.presentmon_exe() and the startup message
-monitor() prints when it's missing) without needing site.json edited.
+enhancement; iperf3 isn't wired into any code path at all), so they're not worth the extra binaries
+in a release that's already working to avoid antivirus false positives on adb alone. PresentMon still
+auto-detects a copy placed next to the exe (drop in PresentMon.exe yourself -- see
+qsite.presentmon_exe() and the startup message monitor() prints when it's missing) without needing
+site.json edited.
 
 Nothing under release/ except this script, release/README.md and release/version_info.txt is meant
 to be committed -- release/build/ (scratch: downloaded platform-tools) and release/dist/ (the

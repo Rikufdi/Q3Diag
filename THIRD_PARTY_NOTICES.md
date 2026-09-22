@@ -28,8 +28,7 @@ deliberately left out of packaged releases — neither is needed for full use of
 extra bundled binary is another thing for antivirus tools to flag (see `release/README.md`'s TODO
 on that). PresentMon (optional PC-side game frame-time capture) auto-detects a copy you place
 yourself as `PresentMon.exe` next to the app (`qsite.presentmon_exe()`); `monitor()` prints where
-to get one if it's missing. iperf3 isn't wired into any code path at all — see
-[`docs/RESEARCH.md`](docs/RESEARCH.md) for the manual network-baseline recipe if you want it.
+to get one if it's missing. iperf3 isn't wired into any code path at all.
 
 This project is not affiliated with, endorsed by, or sponsored by Google, Meta, or Virtual Desktop
 (Guy Godin / VRD LLC). Product names are used for identification purposes only.
