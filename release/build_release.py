@@ -100,7 +100,7 @@ reads badly can be told apart from a radio that simply cannot carry the bitrate.
 offers that check before a session starts -- TCP down and up, then a UDP ramp -- but only when
 BOTH halves below are present. The check is the only thing in the tool that uses iperf3.
 
-How this was set up on the machine the tool was written on -- do the same:
+How this was set up on the machine the tool was written on:
 
 1. PC side. One command, nothing to copy across:
 
@@ -113,15 +113,17 @@ How this was set up on the machine the tool was written on -- do the same:
 2. Headset side. This is the awkward half: the headset runs the *server*, so it needs an
    aarch64 Android build. In order of least effort:
 
-   a. Check whether the headset already has one -- plenty of people set this up once and
-      forgot about it:
+   a. If an iperf3 server has ever been run on this headset, take that build back out instead of
+      making a new one -- /data/local/tmp is where such things get staged:
 
         adb shell ls -l /data/local/tmp/iperf3
         adb pull /data/local/tmp/iperf3 vendor/iperf3
 
-      That is exactly how the copy here was recovered (133,600 bytes, aarch64). Reusing it
-      costs nothing: the tool pushes vendor/iperf3 to /data/local/tmp itself and skips the
-      copy when the size already matches.
+      That is how the copy on this rig was recovered: 133,600 bytes of aarch64, pushed by hand
+      during the original baseline measurements on 2026-09-15 at 17:15 -- four minutes before
+      the first recorded test. A headset does NOT come with this: nothing about a Quest ships
+      iperf3, and on one that has never been set up this step simply finds nothing, so go to (b).
+
       No adb on PATH? The release bundles one at _internal\\adb.exe.
 
    b. Otherwise build it. Upstream ships SOURCE ONLY -- every asset on
@@ -135,6 +137,10 @@ How this was set up on the machine the tool was written on -- do the same:
 
    Name the file exactly vendor\\iperf3: no extension, and uncompressed. Nothing here will
    unpack an archive into a path it then executes; that is the user's job on purpose.
+
+   Once the link check has run, the tool leaves the build at /data/local/tmp/iperf3 and skips
+   re-pushing it while the size matches -- so a copy dropped or lost later can always be pulled
+   back with the step (a) commands.
 
 The errors usually say which half is wrong: a build for the wrong architecture is reported as
 "not an aarch64 Android binary", or as "server exited immediately" if it only turns out to be
