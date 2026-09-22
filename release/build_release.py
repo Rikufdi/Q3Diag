@@ -14,6 +14,7 @@ release/dist/Q3Diag-Wizard-<version>-win64.zip) containing:
                               a fallback only: an adb already on PATH or in site.json wins
   NOTICE.txt                 Google's upstream notice for adb, shipped verbatim
   THIRD_PARTY_NOTICES.md, LICENSE, LICENSE-DATA, README.md   copied in as-is
+  AGENTS.md                  the same, for an agent working in the installed copy
   docs/dashboard.jpg         the dashboard screenshot the README embeds (not local-only docs/)
   vendor/                    placeholders for the tools you supply yourself: drop PresentMon.exe
                               here and the wizard auto-detects it; drop iperf3.exe plus an aarch64
@@ -250,7 +251,7 @@ def run_pyinstaller():
 
 def copy_extras():
     app_dir = os.path.join(DIST_DIR, APP_NAME)
-    for name in ("THIRD_PARTY_NOTICES.md", "LICENSE", "LICENSE-DATA", "README.md"):
+    for name in ("THIRD_PARTY_NOTICES.md", "LICENSE", "LICENSE-DATA", "README.md", "AGENTS.md"):
         src = os.path.join(REPO_ROOT, name)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(app_dir, name))

@@ -134,6 +134,19 @@ is in a class of its own. If you enable it:
 The wizard checks free space on the run drive and warns before starting if the estimate could
 exhaust it.
 
+## Reading the results with an agent ##
+
+A session records far more than the verdict uses: per-second device counters, the PC's encoder and
+scheduler state, the compositor's frame log, and with the trace enabled, tens of gigabytes of
+sampled stacks. The verdict only covers the fingerprint metrics, so the questions worth asking
+usually need someone to go back to the artifacts: why a retry burst started, which core absorbed the
+DPC load, what the game's threads were waiting on, whether the radio or the encoder was the limit.
+
+That work suits an agent with filesystem access. Point one at `runs/<run_id>/` along with the
+question you want answered. [`AGENTS.md`](AGENTS.md) documents the entry points, what each artifact
+contains, where everything is stored, and how to help with a first setup, so it can start without
+reading the source.
+
 ## Optional extra capture ##
 
 Neither of these is bundled; both are optional and only used if you point the tool at them.
