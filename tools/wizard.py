@@ -280,7 +280,7 @@ def ensure_streamer_running():
     launch_exe = switcher if switcher and os.path.exists(switcher) else \
         (streamer if streamer and os.path.exists(streamer) else None)
     if launch_exe:
-        ans = input(f"Launch it now ({launch_exe})? [Y/n]: ").strip().lower()
+        ans = input(f"Launch it now ({launch_exe})? [y/n]: ").strip().lower()
         if ans in ("", "y", "yes"):
             subprocess.Popen([launch_exe])
             print("Launched. Give it a few seconds to come up.")
@@ -342,14 +342,15 @@ def ask_presentmon_hint(run_id):
     _print_header("PC game frame-rate capture (optional)")
     rate = cell.DATA_RATES_MB_PER_MIN["presentmon"]
     print(f"PresentMon found: {exe}")
-    print(f"Capture is written to {os.path.join(BASE, 'runs', run_id, 'presentmon.csv')}, about")
-    print(f"{rate:.1f} MB per minute of play -- it scales with the game's frame rate.")
-    print()
     print("If you'd like accurate PC-side fps for the game itself (not just the headset's own frame")
     print("rate), type its name below -- it'll be matched once you actually launch it, so it doesn't")
     print("need to be running yet.")
     print("Type 'all' to capture every presenting process, or leave it blank to skip PC-side capture")
     print("entirely (nothing then attaches to the game).")
+    # Kept immediately above the prompt, like the trace's size warning: this is cost-of-the-decision
+    # information (where it writes, and how fast it grows), not background.
+    print(f"Capture is written to {os.path.join(BASE, 'runs', run_id, 'presentmon.csv')}, about")
+    print(f"{rate:.1f} MB per minute of play -- it scales with the game's frame rate.")
     raw = ask("Game name ('all' = every process, blank = skip)", "").strip()
     if not raw:
         return None                      # None -> monitor(presentmon_capture=False)
@@ -384,9 +385,9 @@ def ask_and_run_linkcheck(run_id, serial):
     if not exe and not headset_bin:
         return None
     if not (exe and headset_bin):
-        missing = ("the headset build (an aarch64 binary named 'iperf3' in vendor/, or iperf3_android)"
-                   if exe else "the PC client (vendor/iperf3.exe, or iperf3 on PATH)")
-        print(f"\n(link check skipped: it also needs {missing} -- see vendor/iperf3_here.txt)")
+        missing = ("no aarch64 iperf3 in vendor/" if exe
+                   else "no iperf3 client (install iperf3, or drop vendor/iperf3.exe)")
+        print(f"(link check skipped: {missing})")
         return None
 
     _print_header("Link capacity check (optional)")
@@ -395,7 +396,7 @@ def ask_and_run_linkcheck(run_id, serial):
     print("loads the same link -- so run it now, before playing, not during.")
     print("Nothing should be streaming right now (no game running in the headset).")
     try:
-        ans = input("Run the link check now? [y/N]: ").strip().lower()
+        ans = input("Run the link check now? [y/n]: ").strip().lower()
     except EOFError:
         return None
     if ans not in ("y", "yes"):
@@ -433,17 +434,20 @@ def start_trace(run_id, max_seconds):
     completed -- so the caller always arranges the stop. The first version returned False on timeout,
     which meant a helper that came up after the 60 s wait was never told to stop and recorded until
     its own ceiling; confirmed live 2026-09-19, where the trace did start and the operator reasonably
-    concluded it hadn't, because an elevated window with no output looks exactly like a dead one."""
+    concluded it hadn't, because an elevated window with no output looks exactly like a dead one.
+
+    The size warning is printed *before* the prompt, not after it: that warning is the whole input to
+    the decision (GB per minute, and a perturbed session), so printing it afterwards tells the
+    operator something they can no longer act on."""
+    gb_min = cell.DATA_RATES_MB_PER_MIN["trace"] / 1024
+    print(f"A WPR trace writes about {gb_min:.2f} GB per minute (staged in %TEMP%, moved into the run")
+    print("folder at the end), so both drives need room -- and it perturbs the session it measures.")
     try:
-        ans = input("Record a performance trace for this session (one admin prompt)? [y/N]: ").strip().lower()
+        ans = input("Record a performance trace for this session (one admin prompt)? [y/n]: ").strip().lower()
     except EOFError:
         return False
     if ans not in ("y", "yes"):
         return False
-
-    gb_min = cell.DATA_RATES_MB_PER_MIN["trace"] / 1024
-    print(f"A WPR trace writes about {gb_min:.2f} GB per minute (staged in %TEMP%, moved into the run")
-    print("folder at the end), so both drives need room -- and it perturbs the session it measures.")
 
     run_dir = os.path.join(BASE, "runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
@@ -664,7 +668,7 @@ def summarize(run_id):
             print(f"  - {f['metric']}: {f['baseline']} -> {f['current']} (delta {f['delta']:+})")
     print(f"Full results: runs/{run_id}/results.json")
 
-    ans = input("\nSave this run as the new baseline? [y/N]: ").strip().lower()
+    ans = input("\nSave this run as the new baseline? [y/n]: ").strip().lower()
     if ans in ("y", "yes"):
         cell.fingerprint(run_id, save_baseline=True)
         print("Saved as the new baseline for this configuration.")
