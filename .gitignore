@@ -35,6 +35,10 @@ tools/*.log
 probe/**/raw/
 probe/**/*-raw/
 
+# Local agent write-up from a probe session, like handoff.md: dev-side notes rather than a published
+# measurement (the probe's own SUMMARY.md/index.json stay tracked alongside the other probe dirs).
+probe/2026-09-20-110528/agent-ethernet.md
+
 # AP administration screenshot with the Wi-Fi passphrase rendered in plaintext.
 topology/ap-radio.png
 
