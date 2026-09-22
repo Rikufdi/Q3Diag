@@ -209,7 +209,7 @@ Per-run files written by `monitor` (all in `runs/<run_id>/`):
 | `quest_env_samples.tsv` | OculusWifi STA state (TX power), thermal zones, GPU busy %, **headset mount state** | 10 s |
 | `cm_wifi_snapshots.txt` | `dumpsys cm_wifi` (controller status history, P2P events, RSDB, map-share) | 30 s |
 | `sf_latency_samples.tsv` | SurfaceFlinger `--latency` advance of the active panel layer | 1 s |
-| `vr_api_logcat.txt` | per-second FPS/Stale/Stale2-5-10-max/TW/App/CFL/ICFL/PoseAge/ASW lines | 1 s |
+| `headset_logcat.txt` | `VrApi` per-second FPS/Stale/Stale2-5-10-max/TW/App/CFL/ICFL/PoseAge/ASW lines (1 s), `QC2Comp` decoder stats, and the streaming client's own tags (`VirtualDesktop.Android`, `OVRMediaCodec`, `VR_Engine`, `ALVR`; overridable with `headset_log_tags`) | 1 s + client-driven |
 | `ping_samples.txt` | PC→headset ICMP | 1 s |
 | `pc_samples.tsv` | NVENC util, GPU util/clocks/power, Windows TCP retransmits/s + sent/s, **DPC/ISR % per core (mean + worst core)**, **memory (available MB, pages/s, page faults/s)**, **the game process (CPU %, working set, priority class, page faults/s, and a per-sample histogram of what its threads are waiting on — `WrQueue`/`WrLpcReceive` = blocked on another process, `WrEventPair` = an event/fence, `WrMutex`/`WrResource` = lock contention, `WrPageIn` = paging, `WrCpuRateControl` = EcoQoS; priority `Idle` means throttling)**, **the VR runtime + Virtual Desktop stack (matched names, summed CPU %/working set — all per-process figures come from perf counters, since Windows denies a non-elevated sampler the handle `Get-Process` needs for a higher-integrity process)**, streamer CPU %/RSS | ~2 s |
 | `trace.etl` (+ `trace-state.json`) | optional Windows Performance Recorder trace — default profile is **CPU (sampled stacks) at a 2 ms interval**; add DiskIO/Audio via `-Profiles` only when chasing them. Captured by `tools/Trace-Session.ps1` (needs admin; the wizard offers it per session). Written to `%TEMP%` first and moved here when finished, because at ~19 MB/s it would otherwise contend with the game's own disk. **Git-ignored.** ⚠️ **The trace stutters the game it is measuring** (a traced session had 6–36× the >100 ms frames of untraced ones), so read traced runs as attribution evidence, not as performance measurements. Open with WPA, or `wpaexporter -i trace.etl -profile <saved.wpaProfile> -outputfolder <dir>` | opt-in |
@@ -219,7 +219,35 @@ Per-run files written by `monitor` (all in `runs/<run_id>/`):
 Reducers of note in `cell.py`: `decay_events()` (sustained delivered-rate collapses + the encoder/TCP state
 inside each one — the discriminator between an encoder stall and a TCP collapse), `codec_events()`
 (video-codec lifecycle from `batterystats --history`), `cm_reduce()` (controller/P2P events + map-share
-cadence), `p2p_stats()`, `pc_summary()`, `ovr_window()`.
+cadence), `p2p_stats()`, `pc_summary()`, `ovr_window()`, `vr_api_reduce()` (per-second panel telemetry;
+summarises tearing, early frames, predicted period, minimum `DpuScale`, dropped/late-motion frames,
+preemptions — everything beyond the fps/stale pair the older rows carried), `codec_stream_reduce()`
+(decoder output rate, lag and the decoded codec identity).
+
+Panel/quality and codec identity, in the artifacts:
+- `vr_api_samples.csv` carries every numeric VrApi field per second, including the ones with no summary
+  key (`dvfs`, `pls`, `lp`, `cabc`, `sf`, `gd_ms`, `cpu_gpu_ms`, `mem_mhz`, panel clocks) — correlate
+  there rather than re-capturing a session.
+- `codec_stream_codec` / `codec_stream_low_latency` / `codec_stream_bit_depth` come from the QC2Comp
+  instance name (`[avcDLowLat_39]` = H.264 low-latency, instance 39). **Bit depth is only set when the
+  name says "10"** — absence is not evidence of 8-bit, except for H.264, which VD has no 10-bit variant
+  of (`vd-codec-enum.md`).
+- `codec_stream_codec_mismatch` compares that against `settings.json`'s codec (VD's PreferredCodec
+  display name); a mismatch gets a `codec_stream_codec_note` saying the stream fell back. A plain
+  `cell.py monitor` writes `codec: live`, which has no expectation and so never mismatches.
+- `codec_stream_instances_late` lists decoder instances created >30 s after the stream was already
+  running — a re-established stream (reconnect/re-negotiation) or the desktop view opening on top.
+- The extra logcat tags cost ~0 MB/min: a live 120 fps VD session writes ~0.09 MB/min of
+  VrApi+QC2Comp, and the client tags contributed 5 SELinux audit lines in 12 minutes.
+
+**Client-side stream logs are a verified dead end on this rig (2026-09-22).** Do not re-open this
+without new evidence: Virtual Desktop's PC logs (`C:\ProgramData\Virtual Desktop\{Streamer,Server,Service}Log.txt`)
+were **not written at all** during a live 120 fps stream and hold only .NET stack traces;
+`%APPDATA%\Virtual Desktop\` contains `GameSettings.json` and no `VirtualDesktop.Server.log`; the
+headset's `VirtualDesktop.Android` tag emits only `avc: denied` audit lines; the VD package has no
+`/sdcard/Android/data/` directory and Air Link's `com.oculus.xrstreamingclient/files/` is empty; and
+`logcat -s OVRMediaCodec VR_Engine ALVR` is silent. The nearest real proxies for "what did the client
+negotiate" are the decoder instance name (codec) and VrApi's `DpuScale`/`DVFS`/`Tear`/`Early`.
 
 Rules that mattered in practice:
 - The elevated pktmon task is deliberately absent — do not re-create it; `wire_*` stays null and the

@@ -42,7 +42,7 @@ run data is under `<base_dir>/runs/<run_id>/`. Nothing is uploaded anywhere.
 | `quest_env_samples.tsv` | radio state, SoC/GPU/CPU thermals, GPU busy, mount state |
 | `sf_latency_samples.tsv`, `sf_layers.log` | SurfaceFlinger panel latency and the active layer |
 | `cm_wifi_snapshots.txt` | `dumpsys` controller-link / P2P state changes |
-| `vr_api_logcat.txt` | `logcat -s VrApi QC2Comp`: compositor fps, stale frames, decoder stats |
+| `headset_logcat.txt` | filtered headset logcat: `VrApi` compositor fps / stale / tear / early frames, predicted period, quality-scaling state (`DpuScale`) and dropped-frame counters, plus `QC2Comp` decoder stats whose instance name carries the decoded codec. The streaming-client tags (`VirtualDesktop.Android`, `OVRMediaCodec`, `VR_Engine`, `ALVR` — see `headset_log_tags`) are captured opportunistically: on the reference rig VD's own tag emits only SELinux audit lines, so client-side bitrate/connection telemetry does not exist there |
 | `pc_samples.tsv` | NVENC and GPU use, TCP retransmits, DPC/ISR per core, memory, game process CPU / working set / thread-wait histogram |
 | `ping_samples.txt` | 1 Hz PC to headset ICMP |
 | `ovr_metrics.csv` | Oculus Metrics CSV pulled from the headset |

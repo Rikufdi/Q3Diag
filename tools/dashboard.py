@@ -6,7 +6,7 @@ Usage:
   python tools/dashboard.py <run_id> [--port 8765] # in another; open http://127.0.0.1:8765/
 
 Reads the same TSVs `monitor` is appending to (quest_wifi_samples.tsv, quest_net_samples.tsv,
-quest_env_samples.tsv, pc_samples.tsv, vr_api_logcat.txt, ping_samples.txt) and re-derives a live
+quest_env_samples.tsv, pc_samples.tsv, headset_logcat.txt, ping_samples.txt) and re-derives a live
 snapshot every request -- no state of its own, so it can be started/stopped/restarted freely without
 disturbing the monitor. Meant for watching link/encoder/frame health in real time while testing AP
 placement, headset position, or cable routing (pair with `cell.py linktest`/`watch --beep` for audio
@@ -113,7 +113,7 @@ def status(run_id):
     pc = cell.tail_row(os.path.join(run_dir, "pc_samples.tsv"))
     out.update({"enc_util_pct": pc.get("enc_util_pct"), "gpu_util_pct": pc.get("gpu_util_pct"),
                 "pc_tcp_retrans_per_s": pc.get("tcp_retrans_per_s"), "streamer_ws_mb": pc.get("streamer_ws_mb")})
-    out["vrapi"] = cell.vrapi_tail(os.path.join(run_dir, "vr_api_logcat.txt"))
+    out["vrapi"] = cell.vrapi_tail(os.path.join(run_dir, cell.HEADSET_LOGCAT_NAME))
     pr, pt = cell.ping_counts(os.path.join(run_dir, "ping_samples.txt"))
     out["ping_replies"], out["ping_timeouts"] = pr, pt
     try:

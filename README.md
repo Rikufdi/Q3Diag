@@ -5,7 +5,9 @@ previously recorded baseline for the same configuration and names the metrics th
 thresholds.
 
 During a real play session it records the headset's Wi-Fi counters (retries, losses, RSSI, link rate,
-band), its thermals and GPU load, the compositor's frame rate and stale frames, the PC's NVENC and GPU
+band), its thermals and GPU load, the compositor's frame rate, stale frames, panel tearing and early
+frames with the runtime's own quality-scaling state, which codec the headset actually decoded (checked
+against the one the run asked for), the PC's NVENC and GPU
 use with DPC/ISR time and memory pressure, the game process's CPU and thread-wait states,
 PC-to-headset ping latency and loss, and optionally the game's own frame times through PresentMon.
 
