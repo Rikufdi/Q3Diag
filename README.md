@@ -9,12 +9,15 @@ band), its thermals and GPU load, the compositor's frame rate and stale frames, 
 use with DPC/ISR time and memory pressure, the game process's CPU and thread-wait states,
 PC-to-headset ping latency and loss, and optionally the game's own frame times through PresentMon.
 
-Three optional extras: a live local dashboard while the session runs, a Windows Performance Recorder
-trace for attributing stalls, and a pre-session iperf3 link-capacity check (TCP both ways, then a UDP
-ramp).
+A guided wizard drives it end to end: connect, measure, verdict, baseline. It serves a live dashboard
+on localhost for the whole session (the URL is printed when the session starts), so the numbers can be
+watched as they arrive.
 
-A guided wizard drives it end to end: connect, measure, verdict, baseline. Windows-only, and
-everything a session records is written under runs/<run_id>/, stays local, and is excluded from git.
+Two optional extras, both off unless asked for: a Windows Performance Recorder trace for attributing
+stalls, and a pre-session iperf3 link-capacity check (TCP both ways, then a UDP ramp).
+
+Windows-only, and everything a session records is written under runs/<run_id>/, stays local, and is
+excluded from git.
 
 --------------------------------------------------------------------------------------------------
 
