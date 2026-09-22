@@ -19,20 +19,31 @@ How this was set up on the machine the tool was written on:
 2. Headset side. This is the awkward half: the headset runs the *server*, so it needs an
    aarch64 Android build. In order of least effort:
 
-   a. Build it. Upstream ships SOURCE ONLY - every asset on
-      https://github.com/esnet/iperf/releases is a .tar.gz, there is no official Android or
-      Windows binary -- so a headset build means cross-compiling for aarch64-linux-android
-      with the Android NDK (the tarball's ./configure plus the NDK's clang wrappers, which
-      needs a POSIX shell: MSYS2 or WSL).
+   a. Download the prebuilt arm64-v8a binary. Upstream ships no Android build at all, but these
+      are NDK-r28c builds for Android 9.0+ (API 28+):
+
+        https://github.com/davidBar-On/android-iperf3/tree/gh-pages/libs/arm64-v8a
+
+      Take iperf3.21 (the same one this tool was measured against) and save it as
+      vendor\iperf3. Its sha256 is:
+
+        22dc88df3c13bce1e4f0167700d1d3c684ccf642143e9bf480947cd7fb97b060
+
+      Worth checking that hash: with no upstream Android build to compare against, this is a
+      third-party binary, and the hash is the only way to know you got the same bytes.
 
    b. If an iperf3 server has ever been run on this headset, take that build back out instead of
-      making a new one -- /data/local/tmp is where such things get staged:
+      fetching a new one -- /data/local/tmp is where such things get staged:
 
         adb shell ls -l /data/local/tmp/iperf3
         adb pull /data/local/tmp/iperf3 vendor/iperf3
 
-   c. A prebuilt binary from somewhere else works as well, but better to build yourself if
-      possible.
+   c. Build it yourself, if you would rather not run someone else's binary. Upstream ships
+      SOURCE ONLY -- every asset on https://github.com/esnet/iperf/releases is a .tar.gz, with
+      no Android or Windows binary -- so this means cross-compiling for aarch64-linux-android
+      with the Android NDK (the tarball's ./configure plus the NDK's clang wrappers, which
+      needs a POSIX shell: MSYS2 or WSL). The most work of the three, and note that the copy
+      this tool was measured against is the download in (a), not a local build.
 
    Name the file exactly vendor\iperf3: no extension, and uncompressed. Nothing here will
    unpack an archive into a path it then executes; that is the user's job on purpose.
