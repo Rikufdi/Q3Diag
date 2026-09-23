@@ -261,6 +261,12 @@ headset's `VirtualDesktop.Android` tag emits only `avc: denied` audit lines; the
 negotiate" are the decoder instance name (codec) and VrApi's `DpuScale`/`DVFS`/`Tear`/`Early`.
 
 Rules that mattered in practice:
+- **Re-reducing a run with older code silently degrades its `results.json`.** `cell.py results`
+  overwrites the file in place, and a reducer that doesn't know a run's newer keys just doesn't emit
+  them — a run captured by this branch, re-reduced from `main`, lost all 53 `vr_api_*`/`codec_stream_*`
+  keys (and reads `vr_api_logcat.txt`, a name this branch renamed, so it found no logcat at all).
+  Confirmed 2026-09-23 while testing the endpoint fix: reduce a run with the branch or build that
+  produced it, and diff `results.json` if you are not sure which that was.
 - The elevated pktmon task is deliberately absent — do not re-create it; `wire_*` stays null and the
   delivered rate is reconstructed from wlan0 rx deltas instead.
 - Windows file locks: the PowerShell samplers briefly hold their TSVs open, so every reader retries
