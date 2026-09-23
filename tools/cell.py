@@ -133,15 +133,16 @@ MEAS_COLS = [
     "vr_api_pose_age_p95_max", "vr_api_temp_c_max", "vr_api_gpu_pct_mean",
     "vr_api_tear_total", "vr_api_tear_seconds", "vr_api_early_total", "vr_api_early_seconds",
     "vr_api_prd_ms_mean", "vr_api_prd_ms_max", "vr_api_dpu_scale_min",
-    "vr_api_dpu_scale_below_native", "vr_api_dropped_frames_total", "vr_api_late_motion_total",
-    "vr_api_preempt_total", "vr_api_free_mb_min", "vr_api_lat_ms_max",
+    "vr_api_dpu_scale_below_native", "vr_api_dropped_frames_total", "vr_api_dropped_seconds",
+    "vr_api_late_motion_total", "vr_api_late_motion_seconds",
+    "vr_api_preempt_total", "vr_api_preempt_seconds", "vr_api_free_mb_min", "vr_api_lat_ms_max",
     "codec_stream_instance", "codec_stream_samples", "codec_stream_fps_mean", "codec_stream_fps_min",
     "codec_stream_seconds_below_60fps",
     "codec_stream_mbps_mean", "codec_stream_mbps_min", "codec_stream_lag_max",
     "codec_stream_workrate_min", "codec_stream_other_instances",
     "codec_stream_decoder", "codec_stream_codec", "codec_stream_low_latency",
     "codec_stream_bit_depth", "codec_stream_configured_codec", "codec_stream_codec_mismatch",
-    "codec_stream_instance_count", "codec_stream_instances_late",
+    "codec_stream_instance_count", "codec_stream_instances_new",
     "tcp_retrans_segs", "tcp_in_errs", "wlan0_rx_errs", "wlan0_rx_drop", "wlan0_tx_errs", "wlan0_tx_drop",
     "p2p0_rx_mbps", "p2p0_tx_mbps", "p2p0_rx_errs", "p2p0_rx_drop", "p2p0_tx_errs", "p2p0_tx_drop",
     "cm_snapshots", "cm_events_session", "cm_ctrl_last_left", "cm_ctrl_last_right",
@@ -1867,16 +1868,17 @@ def _num(text):
     return float(m.group(0)) if m else None
 
 
-def _cum_delta(vals):
-    """Change in a cumulative counter across a window: last minus first when the series never goes
-    backwards, otherwise the sum of its positive steps (a counter that resets mid-window -- the
-    decoder or the panel object was recreated -- must not report a negative or an absurd total)."""
+def _bucket_sum(vals):
+    """Total of a per-second reading the runtime emits (Stale/Tear/Early/DR/LM/Preempt all behave this
+    way): plain sum, plus how many seconds it was non-zero. Deliberately not a delta of last-minus-first
+    -- a 2.4 min run's Preempt series reads 136, 165, 233, 301, 319, 308, 309, 351, 305, 248, ... (64 of
+    its 141 samples are lower than the one before), so these fields are the runtime's value *for that
+    second*, not counters that accumulate across the session. Treating them as cumulative inflated
+    dropped_frames/preempt by an order of magnitude. Returns (None, None) when the field is absent."""
     vs = [v for v in vals if v is not None]
-    if len(vs) < 2:
-        return None
-    if all(b >= a for a, b in zip(vs, vs[1:])):
-        return vs[-1] - vs[0]
-    return sum(b - a for a, b in zip(vs, vs[1:]) if b > a)
+    if not vs:
+        return None, None
+    return int(sum(vs)), sum(1 for v in vs if v)
 
 
 def _row_dev_epoch(stamp, ref_epoch):
@@ -2029,7 +2031,7 @@ def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, 
     instead of only in the operator noticing the picture looks soft. A decoder instance whose first
     sample lands well after the stream was already running is a decoder created mid-session, i.e. the
     stream was re-established (a reconnect/re-negotiation, or the desktop view opening on top of the VR
-    stream) -- reported as codec_stream_instances_late rather than folded into the averages."""
+    stream) -- reported as codec_stream_instances_new rather than folded into the averages."""
     if not os.path.exists(path):
         return {}
     row_re = re.compile(
@@ -2107,7 +2109,18 @@ def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, 
         note = (f"decoder instance '{token}' does not name a codec this reducer recognises, so it could "
                 f"not be checked against the configured '{configured}'")
     window_start = min(_clock_s(r["clock"][6:]) for r in rows)
-    late = [i for i, g in groups.items() if _clock_s(g[0]["clock"][6:]) - window_start > 30]
+    # Instances that appear only after the window's own first sample were created while the session was
+    # already running. A 30s threshold was tried first and missed the real event in a 2.4 min run
+    # (2026-09-23): instance 40 ran 19:59:30-19:59:50 at 60fps, then 41 and 42 were born 20 ms apart at
+    # 19:59:56 and ran to the end -- a stream re-established 26 s in, reported as nothing. Any instance
+    # starting after the first one is therefore listed, with the offset that shows when: the cause is
+    # either the stream being re-established (a new decoder for the same role) or a second stream
+    # starting (the desktop view opening on top of the VR stream), and the per-instance spans in
+    # codec_stream_other_instances say which, so the key reports the timestamped fact rather than
+    # guessing between them.
+    new_ids = [f"{i}@+{int(_clock_s(g[0]['clock'][6:]) - window_start)}s"
+               for i, g in sorted(groups.items(), key=lambda kv: _clock_s(kv[1][0]["clock"][6:]))
+               if _clock_s(g[0]["clock"][6:]) > window_start]
 
     out = {
         "codec_stream_instance": vr,
@@ -2135,7 +2148,7 @@ def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, 
         "codec_stream_configured_codec": configured or None,
         "codec_stream_codec_mismatch": mismatch if (want or (configured and family is None)) else None,
         "codec_stream_instance_count": len(groups),
-        "codec_stream_instances_late": ",".join(late),
+        "codec_stream_instances_new": ",".join(new_ids),
     }
     if note:
         out["codec_stream_codec_note"] = note
@@ -2155,10 +2168,13 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
     durations GD and CPU&GPU, and the cumulative counters Preempt and LCnt's DR/LM), and the subset
     with an unambiguous reading also gets a summary key: panel tearing/early frames, predicted display
     period, minimum DpuScale (1.00 = native scale, below it the runtime has already shrunk what it
-    renders), dropped/late-motion frames, preemptions, minimum free memory, and the highest available
-    latency. Observed live 2026-09-22 on a VD H.264 stream at 120 fps: 90 Hz-era builds and 120 Hz ones
-    differ in which fields appear, so every new key is None rather than 0 when its field is absent --
-    except the counters, which are 0 only when the samples say so."""
+    renders), dropped/late-motion frames and preemptions, minimum free memory, and the highest available
+    latency. **Tear/Early/DR/LM/Preempt are per-second readings, not cumulative counters** -- a 2.4 min
+    run's Preempt series reads 136, 165, 233, 301, 319, 308, 309, 351, 305, 248, ... (64 of 141 samples
+    lower than the one before), so they are summed exactly like Stale, each with a `_seconds` count of
+    how many seconds they were non-zero. Treating them as cumulative overstated dropped frames and
+    preemptions by an order of magnitude. Observed live 2026-09-22/23 on VD H.264 streams at 90 and
+    120 Hz: which fields appear varies by build, so an absent field yields None rather than 0."""
     if not os.path.exists(path):
         return {}
     ts_re = re.compile(r"^(\d\d-\d\d \d\d:\d\d:\d\d\.\d\d\d)\s+\w/VrApi\s*\(\s*(\d+)\)")
@@ -2240,19 +2256,17 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
     def _series(key):
         return [r[key] for r in rows]
 
-    def _sum(key):
-        vs = [v for v in _series(key) if v is not None]
-        return int(sum(vs)) if vs else None
-
-    def _secs(key):
-        return sum(1 for v in _series(key) if v)
-
     prd = [v for v in _series("prd_ms") if v is not None]
     dpu = [v for v in _series("dpu_scale") if v is not None]
     free = [v for v in _series("free_mb") if v is not None]
     # Lat is -1 when the runtime has no latency figure to report, so negative samples are excluded
     # rather than averaged in as if they were a real 1 ms below zero.
     lats = [v for v in _series("lat_ms") if v is not None and v >= 0]
+    tears, tear_s = _bucket_sum(_series("tear"))
+    earlies, early_s = _bucket_sum(_series("early"))
+    dropped, dropped_s = _bucket_sum(_series("dropped"))
+    late_motion, late_motion_s = _bucket_sum(_series("late_motion"))
+    preempts, preempt_s = _bucket_sum(_series("preempt"))
     out = {
         "vr_api_lines": len(rows), "vr_api_asw_lines": asw, "vr_api_lines_skipped": skipped,
         "vr_api_pid": pid, "vr_api_lines_ignored_other_pid": other,
@@ -2272,19 +2286,21 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
         # Panel timing. Tear/Early are per-second counts of frames the panel presented torn, or early
         # relative to its predicted period; they are 0 in a healthy run and neither is visible in the
         # Stale counters, which only count frames the compositor never replaced.
-        "vr_api_tear_total": _sum("tear"), "vr_api_tear_seconds": _secs("tear"),
-        "vr_api_early_total": _sum("early"), "vr_api_early_seconds": _secs("early"),
+        "vr_api_tear_total": tears, "vr_api_tear_seconds": tear_s,
+        "vr_api_early_total": earlies, "vr_api_early_seconds": early_s,
         "vr_api_prd_ms_mean": round(sum(prd) / len(prd), 2) if prd else None,
         "vr_api_prd_ms_max": max(prd) if prd else None,
         # Quality scaling: 1.00 = the runtime is presenting at native scale; below it, the runtime has
         # already started shrinking what it renders, before any bitrate change is visible anywhere else.
         "vr_api_dpu_scale_min": round(min(dpu), 3) if dpu else None,
         "vr_api_dpu_scale_below_native": sum(1 for v in dpu if v < 0.999) if dpu else None,
-        # Cumulative counters across the window (see _cum_delta): DR/LM are the runtime's own dropped
-        # and late-motion frame counters, Preempt its preemption count.
-        "vr_api_dropped_frames_total": _cum_delta(_series("dropped")),
-        "vr_api_late_motion_total": _cum_delta(_series("late_motion")),
-        "vr_api_preempt_total": _cum_delta(_series("preempt")),
+        # The runtime's per-second readings for dropped frames, late motion and preemptions, summed the
+        # same way Stale already is (see _bucket_sum -- these are not cumulative counters). A session
+        # where they only ever read 0 is a session where they never fired; None means the field was
+        # absent from every line (an older build), which is not the same thing.
+        "vr_api_dropped_frames_total": dropped, "vr_api_dropped_seconds": dropped_s,
+        "vr_api_late_motion_total": late_motion, "vr_api_late_motion_seconds": late_motion_s,
+        "vr_api_preempt_total": preempts, "vr_api_preempt_seconds": preempt_s,
         "vr_api_free_mb_min": min(free) if free else None,
         "vr_api_lat_ms_max": round(max(lats), 2) if lats else None,
     }

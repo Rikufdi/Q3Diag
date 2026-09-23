@@ -228,15 +228,26 @@ Panel/quality and codec identity, in the artifacts:
 - `vr_api_samples.csv` carries every numeric VrApi field per second, including the ones with no summary
   key (`dvfs`, `pls`, `lp`, `cabc`, `sf`, `gd_ms`, `cpu_gpu_ms`, `mem_mhz`, panel clocks) — correlate
   there rather than re-capturing a session.
+- **`Tear`, `Early`, `LCnt`'s `DR`/`LM` and `Preempt` are per-second readings, not cumulative counters.**
+  Established from a 2.4 min run (2026-09-23) whose Preempt series reads 136, 165, 233, 301, 319, 308,
+  309, 351, 305, 248, … — 64 of 141 samples lower than the one before. They are summed like `Stale`,
+  each with a `_seconds` count of non-zero seconds; a last-minus-first delta (the first attempt)
+  overstated dropped frames and preemptions by an order of magnitude.
 - `codec_stream_codec` / `codec_stream_low_latency` / `codec_stream_bit_depth` come from the QC2Comp
   instance name (`[avcDLowLat_39]` = H.264 low-latency, instance 39). **Bit depth is only set when the
   name says "10"** — absence is not evidence of 8-bit, except for H.264, which VD has no 10-bit variant
   of (`vd-codec-enum.md`).
 - `codec_stream_codec_mismatch` compares that against `settings.json`'s codec (VD's PreferredCodec
-  display name); a mismatch gets a `codec_stream_codec_note` saying the stream fell back. A plain
-  `cell.py monitor` writes `codec: live`, which has no expectation and so never mismatches.
-- `codec_stream_instances_late` lists decoder instances created >30 s after the stream was already
-  running — a re-established stream (reconnect/re-negotiation) or the desktop view opening on top.
+  display name); a mismatch gets a `codec_stream_codec_note` saying the stream fell back. **In practice
+  this key is usually `null`**: the wizard's own runs always write `codec: auto` (it says the codec is
+  not readable from the headset), and `auto` is deliberately "no expectation". Only a hand-written
+  `settings.json` (or `cell.py` called directly with a codec) exercises the check.
+- `codec_stream_instances_new` lists decoder instances created after the session's first sample, each
+  with its offset (`avcDLowLat_41@+26s`): the stream was re-established, or a second stream (desktop
+  view) started. A 30 s threshold was tried and missed a real re-negotiation 26 s in, so it is
+  threshold-free. Two instances born milliseconds apart and running concurrently are one logical
+  stream with two decoders — read their spans in `codec_stream_other_instances` before calling it a
+  restart.
 - The extra logcat tags cost ~0 MB/min: a live 120 fps VD session writes ~0.09 MB/min of
   VrApi+QC2Comp, and the client tags contributed 5 SELinux audit lines in 12 minutes.
 
