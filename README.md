@@ -5,7 +5,9 @@ previously recorded baseline for the same configuration and names the metrics th
 thresholds.
 
 During a real play session it records the headset's Wi-Fi counters (retries, losses, RSSI, link rate,
-band), its thermals and GPU load, the compositor's frame rate and stale frames, the PC's NVENC and GPU
+band), its thermals and GPU load, the compositor's frame rate, stale frames, panel tearing and early
+frames with the runtime's own quality-scaling state, which codec the headset actually decoded (checked
+against the one the run asked for), the PC's NVENC and GPU
 use with DPC/ISR time and memory pressure, the game process's CPU and thread-wait states,
 PC-to-headset ping latency and loss, and optionally the game's own frame times through PresentMon.
 
@@ -13,8 +15,11 @@ A guided wizard drives it end to end: connect, measure, verdict, baseline. It se
 on localhost for the whole session (the URL is printed when the session starts), so the numbers can be
 watched as they arrive.
 
-Two optional extras, both off unless asked for: a Windows Performance Recorder trace for attributing
-stalls, and a pre-session iperf3 link-capacity check (TCP both ways, then a UDP ramp).
+Two optional extras, both off unless asked for and both needing a tool you supply (see *Optional extra
+capture*): the game's own frame times through PresentMon, and a pre-session iperf3 link-capacity check
+(TCP both ways, then a UDP ramp). A Windows Performance Recorder trace for attributing stalls is built
+in and likewise off by default — but it perturbs the session it measures and writes ~1.3 GB per minute,
+so read its warning below before enabling it.
 
 Windows-only, and everything a session records is written under runs/<run_id>/, stays local, and is
 excluded from git.

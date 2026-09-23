@@ -28,8 +28,12 @@ Per-cell device-side instrumentation (all optional files, written into runs/<run
   quest_env_samples.tsv   OculusWifi STA state + thermals + GPU busy
   sf_latency_samples.tsv  SurfaceFlinger --latency advance of the active panel layer
   ping_samples.txt        PC->headset ICMP at 1 Hz (under-load latency/jitter, previously missing)
-  vr_api_logcat.txt       logcat -s VrApi QC2Comp: per-second FPS/Stale/TW/App/CFL/ICFL/PoseAge (any
-                          stack), plus the codec process's decoder stats (output fps, Mbps, queue lag)
+  headset_logcat.txt      the headset's own logcat (see HEADSET_LOG_TAGS): VrApi/QC2Comp give
+                          per-second FPS/Stale/Tear/Early/Prd/TW/App/CFL/ICFL/PoseAge/quality-scaling
+                          lines (any stack) plus the codec process's decoder stats (output fps, Mbps,
+                          queue lag), and the streaming-client tags are captured opportunistically --
+                          on the reference rig VD's own tag emits only SELinux audit lines, so treat
+                          them as a bonus for other builds, not as the source of bitrate/connection data
   clock.json              headset<->PC clock offset + device uptime at capture time
 """
 import sys, os, re, time, json, csv, socket, subprocess
@@ -45,6 +49,23 @@ TASK = qsite.get("elev_task", "PCVR-Elev")
 RES = os.path.join(qsite.TOOLS_DIR, "elev-do-res.txt")
 CMD = os.path.join(qsite.TOOLS_DIR, "elev-do-cmd.txt")
 OVR_DIR = qsite.get("ovr_metrics_dir")
+
+# The headset logcat stream, and the tags it is filtered to. One stream for two jobs (a session costs
+# one adb reader, not two -- adb traffic shares the very link being measured):
+#   - the VR runtime: VrApi (compositor frame telemetry, the only frame source that also covers Air
+#     Link) and QC2Comp (the hardware decoder's own output rate/bitrate/queue lag, and the codec
+#     identity in its instance name).
+#   - the streaming client's own tags, captured opportunistically. The premise that the client logs its
+#     bitrate adaptation/codec/connection decisions does NOT hold on this rig (verified live
+#     2026-09-22: VirtualDesktop.Android emits only `avc: denied` audit lines, VR_Engine/OVRMediaCodec/
+#     ALVR are silent, VD's PC logs are not written during a stream at all -- see
+#     QUEST-AGENT-PLAYBOOK.md). They cost nothing to keep in the filter (a tag that never emits costs
+#     one match attempt and 0 bytes) and would pick up a build that does log there.
+# `headset_log_tags` in site.json (or QUEST3_HEADSET_LOG_TAGS) replaces the list wholesale, e.g. to add
+# `tag:W`-style priority filters, or to drop the client tags on a rig with a chatty build.
+HEADSET_LOGCAT_NAME = "headset_logcat.txt"
+HEADSET_LOG_TAGS = (qsite.get("headset_log_tags") or
+                    "VrApi QC2Comp VirtualDesktop.Android OVRMediaCodec VR_Engine ALVR").split()
 
 # ---------------------------------------------------------------- data footprint
 # Measured write rates for the artifacts a run produces, in MB per minute. The wizard and the live
@@ -110,10 +131,18 @@ MEAS_COLS = [
     "vr_api_stale_max_consecutive", "vr_api_tw_ms_mean", "vr_api_app_ms_mean",
     "vr_api_cfl_ms_mean", "vr_api_icfl_p95_ms_mean", "vr_api_icfl_p95_ms_max",
     "vr_api_pose_age_p95_max", "vr_api_temp_c_max", "vr_api_gpu_pct_mean",
+    "vr_api_tear_total", "vr_api_tear_seconds", "vr_api_early_total", "vr_api_early_seconds",
+    "vr_api_prd_ms_mean", "vr_api_prd_ms_max", "vr_api_dpu_scale_min",
+    "vr_api_dpu_scale_below_native", "vr_api_dropped_frames_total", "vr_api_dropped_seconds",
+    "vr_api_late_motion_total", "vr_api_late_motion_seconds",
+    "vr_api_preempt_total", "vr_api_preempt_seconds", "vr_api_free_mb_min", "vr_api_lat_ms_max",
     "codec_stream_instance", "codec_stream_samples", "codec_stream_fps_mean", "codec_stream_fps_min",
     "codec_stream_seconds_below_60fps",
     "codec_stream_mbps_mean", "codec_stream_mbps_min", "codec_stream_lag_max",
     "codec_stream_workrate_min", "codec_stream_other_instances",
+    "codec_stream_decoder", "codec_stream_codec", "codec_stream_low_latency",
+    "codec_stream_bit_depth", "codec_stream_configured_codec", "codec_stream_codec_mismatch",
+    "codec_stream_instance_count", "codec_stream_instances_new",
     "tcp_retrans_segs", "tcp_in_errs", "wlan0_rx_errs", "wlan0_rx_drop", "wlan0_tx_errs", "wlan0_tx_drop",
     "p2p0_rx_mbps", "p2p0_tx_mbps", "p2p0_rx_errs", "p2p0_rx_drop", "p2p0_tx_errs", "p2p0_tx_drop",
     "cm_snapshots", "cm_events_session", "cm_ctrl_last_left", "cm_ctrl_last_right",
@@ -647,7 +676,7 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
     files = {k: os.path.join(run_dir, v) for k, v in
              {"wifi": "quest_wifi_samples.tsv", "net": "quest_net_samples.tsv",
               "env": "quest_env_samples.tsv", "sf": "sf_latency_samples.tsv",
-              "layers": "sf_layers.log", "logcat": "vr_api_logcat.txt",
+              "layers": "sf_layers.log", "logcat": HEADSET_LOGCAT_NAME,
               "cm": "cm_wifi_snapshots.txt", "pc": "pc_samples.tsv",
               "ping": "ping_samples.txt", "session": "session.json",
               "presentmon": "presentmon.csv", "presentmon_target": "presentmon_target.json"}.items()}
@@ -658,8 +687,9 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
          "-EnvFile", files["env"], "-CmFile", files["cm"],
          "-Seconds", str(max_seconds + 60)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    logcat = subprocess.Popen([ADB, "-s", ser, "logcat", "-v", "time", "-s", "VrApi", "QC2Comp"],
+    logcat = subprocess.Popen([ADB, "-s", ser, "logcat", "-v", "time", "-s", *HEADSET_LOG_TAGS],
                               stdout=open(files["logcat"], "a", encoding="utf-8"), stderr=subprocess.DEVNULL)
+    print(f"headset logcat -> {files['logcat']} (tags: {' '.join(HEADSET_LOG_TAGS)})")
     pc = subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", PC_SAMPLER,
                            "-OutFile", files["pc"], "-Seconds", str(max_seconds + 60)],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1074,11 +1104,11 @@ def capture(run_id, duration=150):
         stdout=open(os.path.join(run_dir, "ping_samples.txt"), "w"), stderr=subprocess.DEVNULL)
 
     logcat = subprocess.Popen(
-        [ADB, "-s", ser, "logcat", "-v", "time", "-s", "VrApi"],
-        stdout=open(os.path.join(run_dir, "vr_api_logcat.txt"), "w", encoding="utf-8"),
+        [ADB, "-s", ser, "logcat", "-v", "time", "-s", *HEADSET_LOG_TAGS],
+        stdout=open(os.path.join(run_dir, HEADSET_LOGCAT_NAME), "w", encoding="utf-8"),
         stderr=subprocess.DEVNULL)
 
-    # logcat -s VrApi dumps the buffer backlog first (~5 min) - remember the device-clock window so the
+    # logcat -s dumps the buffer backlog first (~5 min) - remember the device-clock window so the
     # reduction keeps only in-cell frames.
     off = clock_before.get("offset_s") or 0.0
     cell_start_dev = time.time() + off
@@ -1815,7 +1845,40 @@ def ping_stats(path):
 
 
 VR_KEYS = ["FPS", "Prd", "Tear", "Early", "Stale", "VSnc", "Lat", "TW", "App", "GD", "CPU&GPU",
-           "GPU%", "CPU%", "CFL", "ICFLp95", "LD", "SF", "Temp", "PoseAgeP95", "Preempt"]
+           "GPU%", "CPU%", "CFL", "ICFLp95", "LD", "SF", "Temp", "PoseAgeP95", "Preempt",
+           # Fields the reducer previously discarded. DpuScale/DVFS are the runtime's own quality
+           # scaling state (a resolution/clock scale the runtime applies before it asks the host for a
+           # different bitrate, so it is the earliest per-second sign the stream is being turned down);
+           # Mem/Free are the memory controller's clock and the device's free memory; PLS/LP/CABC are
+           # further compositor flags. Every one of them lands in vr_api_samples.csv as a parsed number,
+           # and a summary key is emitted only for the fields with an unambiguous reading (see
+           # vr_api_reduce) -- the rest stay in the per-second series for correlation.
+           "DpuScale", "DVFS", "Mem", "Free", "PLS", "LP", "CABC", "Fov", "LCnt"]
+# LCnt is the one field whose value contains a comma ("LCnt=2(DR109,LM2)"), so the generic
+# "(?:^|,)\s*KEY=([^,]*)" scan above truncates it at the comma -- it is parsed by its own regex.
+LCNT_RE = re.compile(r"LCnt=\d+\(DR(\d+),LM(\d+)\)")
+
+
+def _num(text):
+    """First number in a VrApi field value, with its unit stripped: '36ms' -> 36.0, '-1' -> -1.0,
+    '1.00' -> 1.0. None when there is no number at all."""
+    if text is None:
+        return None
+    m = re.search(r"-?\d+(?:\.\d+)?", str(text))
+    return float(m.group(0)) if m else None
+
+
+def _bucket_sum(vals):
+    """Total of a per-second reading the runtime emits (Stale/Tear/Early/DR/LM/Preempt all behave this
+    way): plain sum, plus how many seconds it was non-zero. Deliberately not a delta of last-minus-first
+    -- a 2.4 min run's Preempt series reads 136, 165, 233, 301, 319, 308, 309, 351, 305, 248, ... (64 of
+    its 141 samples are lower than the one before), so these fields are the runtime's value *for that
+    second*, not counters that accumulate across the session. Treating them as cumulative inflated
+    dropped_frames/preempt by an order of magnitude. Returns (None, None) when the field is absent."""
+    vs = [v for v in vals if v is not None]
+    if not vs:
+        return None, None
+    return int(sum(vs)), sum(1 for v in vs if v)
 
 
 def _row_dev_epoch(stamp, ref_epoch):
@@ -1912,12 +1975,34 @@ def wifi_retry_bursts(path, out_tsv=None):
     return out
 
 
-def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, ref_epoch=None):
+# Decoder instance names carry the stream's identity in their prefix: `avcDLowLat_38` (observed live
+# 2026-09-22 on a VD H.264 stream) is an H.264 low-latency decoder, instance 38. The family table maps
+# the names MediaCodec itself uses, so a HEVC/AV1/VP9 instance is recognised the same way; a prefix that
+# matches nothing stays reported raw rather than being forced into a family it may not be. A "10" marker
+# surrounded by non-digits sets the bit depth to 10 -- absent, the depth is reported as unknown instead
+# of assumed to be 8, since only the H.264 case is inferable from VD's own codec enum.
+_DECODER_FAMILIES = (("av1", "AV1"), ("avc", "H.264"), ("h264", "H.264"), ("hevc", "HEVC"),
+                     ("h265", "HEVC"), ("vp9", "VP9"), ("vp8", "VP8"))
+# Configured codec names (VD's PreferredCodec display strings, see tools/vd-codec-enum.md), normalised
+# to letters/digits, mapped to the family the decoder should then be reporting. Anything absent from
+# this table -- "Automatic", the wizard's "live" placeholder, a future codec -- means "no expectation",
+# so no mismatch is reported.
+_CONFIGURED_FAMILIES = {"h264": "H.264", "h264plus": "H.264", "hevc": "HEVC", "hevc10bit": "HEVC",
+                        "av1": "AV1", "av110bit": "AV1", "vp8": "VP8", "vp9": "VP9"}
+
+
+def _clock_s(stamp):
+    hh, mm_, ss = stamp.split(":")
+    return int(hh) * 3600 + int(mm_) * 60 + float(ss)
+
+
+def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, ref_epoch=None,
+                        configured_codec=None):
     """Decode-side stream stats, straight from the headset's hardware codec process.
 
-    `logcat -s VrApi QC2Comp` (see monitor()'s logcat launch) carries one statistics line roughly every
-    5 seconds per decoder instance out of `mediacodec` / media.hwcodec (the compositor's VrApi line, by
-    contrast, is once a second), e.g.
+    `logcat -s <HEADSET_LOG_TAGS>` (see monitor()'s logcat launch) carries one statistics line roughly
+    every 5 seconds per decoder instance out of `mediacodec` / media.hwcodec (the compositor's VrApi
+    line, by contrast, is once a second), e.g.
 
       I QC2Comp : [avcDLowLat_57] Stats: Pending(0) i/p-done(0) Works: Q: 25235/Done 25236|
                   Work-Rate: Q(60.0/s ...) Done(59.994/s ...)| Stream: 60.11fps 7.4Mbps
@@ -1935,7 +2020,18 @@ def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, 
     decoder instances for a single 214s run, spanning three different VD sessions, and then reported
     whichever had the highest mean bitrate -- i.e. numbers for a stream that had already ended. The
     instance ids are the tell: they only ever increase, so a run whose decoders step 60 -> 61 -> 62 ->
-    66 is being read across session boundaries."""
+    66 is being read across session boundaries.
+
+    The instance name also carries the stream's identity, which is the closest thing to "which codec was
+    really selected" that exists on the client: `[avcDLowLat_38]` is an H.264 low-latency decoder,
+    instance 38 (observed live 2026-09-22 on a VD H.264 stream at 120 fps / 261.7 Mbps). That is
+    compared against what the run was configured for (`settings.json`'s codec, i.e. VD's PreferredCodec
+    display name -- see tools/vd-codec-enum.md), which is how a silent codec fallback becomes visible:
+    a stream configured HEVC that decodes H.264 shows up as codec_stream_codec_mismatch with a note,
+    instead of only in the operator noticing the picture looks soft. A decoder instance whose first
+    sample lands well after the stream was already running is a decoder created mid-session, i.e. the
+    stream was re-established (a reconnect/re-negotiation, or the desktop view opening on top of the VR
+    stream) -- reported as codec_stream_instances_new rather than folded into the averages."""
     if not os.path.exists(path):
         return {}
     row_re = re.compile(
@@ -1987,9 +2083,6 @@ def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, 
     # samples understates starvation in wall-clock terms: a run whose decoder reported 10fps on two
     # samples was starved for ~10s, not 2 (confirmed against a PC-side stall of the same length). The
     # sample describes the period since the previous report, so that interval is what it accounts for.
-    def _clock_s(stamp):
-        hh, mm_, ss = stamp.split(":")
-        return int(hh) * 3600 + int(mm_) * 60 + float(ss)
     starved_s, prev_t = 0.0, None
     for r in sel:
         t = _clock_s(r["clock"][6:])          # "MM-DD HH:MM:SS.mmm" -> "HH:MM:SS.mmm"
@@ -1997,7 +2090,39 @@ def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, 
             starved_s += t - prev_t
         prev_t = t
 
-    return {
+    # Decoder identity from the instance name (see the docstring), compared against what the run was
+    # configured for. `name` keeps the raw prefix so an unrecognised build is still readable, rather
+    # than being force-fitted into a codec family it may not be.
+    token = vr.split("_")[0]
+    family = next((fam for tok, fam in _DECODER_FAMILIES if token.lower().startswith(tok)), None)
+    low_latency = "lowlat" in token.lower()
+    depth = 10 if re.search(r"(?:^|[^0-9])10(?:bit)?", token.lower()) else None
+    configured = (configured_codec or "").strip()
+    want = _CONFIGURED_FAMILIES.get(re.sub(r"[^a-z0-9]", "", configured.lower())) if configured else None
+    got = family or f"unknown({token})"
+    mismatch = (want != family) if (want and family) else None
+    note = None
+    if mismatch:
+        note = (f"configured '{configured}' but the decoder is running {family} -- the stream fell back "
+                f"to a different codec than the one asked for")
+    elif configured and family is None:
+        note = (f"decoder instance '{token}' does not name a codec this reducer recognises, so it could "
+                f"not be checked against the configured '{configured}'")
+    window_start = min(_clock_s(r["clock"][6:]) for r in rows)
+    # Instances that appear only after the window's own first sample were created while the session was
+    # already running. A 30s threshold was tried first and missed the real event in a 2.4 min run
+    # (2026-09-23): instance 40 ran 19:59:30-19:59:50 at 60fps, then 41 and 42 were born 20 ms apart at
+    # 19:59:56 and ran to the end -- a stream re-established 26 s in, reported as nothing. Any instance
+    # starting after the first one is therefore listed, with the offset that shows when: the cause is
+    # either the stream being re-established (a new decoder for the same role) or a second stream
+    # starting (the desktop view opening on top of the VR stream), and the per-instance spans in
+    # codec_stream_other_instances say which, so the key reports the timestamped fact rather than
+    # guessing between them.
+    new_ids = [f"{i}@+{int(_clock_s(g[0]['clock'][6:]) - window_start)}s"
+               for i, g in sorted(groups.items(), key=lambda kv: _clock_s(kv[1][0]["clock"][6:]))
+               if _clock_s(g[0]["clock"][6:]) > window_start]
+
+    out = {
         "codec_stream_instance": vr,
         "codec_stream_samples": len(sel),
         "codec_stream_fps_mean": round(sum(fps) / len(fps), 2),
@@ -2016,7 +2141,18 @@ def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, 
             f"{i}:{round(means[i], 1)}Mbps/{round(sum(x['stream_fps'] for x in g) / len(g), 1)}fps/"
             f"{len(g)}s"
             for i, g in sorted(groups.items()) if i != vr),
+        "codec_stream_decoder": token,
+        "codec_stream_codec": got,
+        "codec_stream_low_latency": low_latency,
+        "codec_stream_bit_depth": depth,
+        "codec_stream_configured_codec": configured or None,
+        "codec_stream_codec_mismatch": mismatch if (want or (configured and family is None)) else None,
+        "codec_stream_instance_count": len(groups),
+        "codec_stream_instances_new": ",".join(new_ids),
     }
+    if note:
+        out["codec_stream_codec_note"] = note
+    return out
 
 
 def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
@@ -2024,7 +2160,21 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
        FPS=90/90,...,Stale=0,Stale2/5/10/max=0/0/0/0,...,TW=1.77ms,App=1.46ms,...,CFL=12.54/16.83,
        ICFLp95=15.81,...,Temp=38.0C/0.0C,...,GPU%=0.31,PoseAgeP95=0.00
        plus a parallel ASW= line. This is the only frame telemetry that also covers Air Link.
-       since_dev_s trims the pre-cell logcat backlog (the main buffer holds ~5 min)."""
+       since_dev_s trims the pre-cell logcat backlog (the main buffer holds ~5 min).
+
+    The line carries ~35 fields and this reducer used to summarise 12 of them. The rest are now parsed
+    into vr_api_samples.csv (panel timing Tear/Early/Prd/VSnc, the runtime's quality scaling DpuScale
+    and DVFS, memory clock/free memory Mem/Free, the compositor flags PLS/LP/CABC, GPU/CPU frame
+    durations GD and CPU&GPU, and the cumulative counters Preempt and LCnt's DR/LM), and the subset
+    with an unambiguous reading also gets a summary key: panel tearing/early frames, predicted display
+    period, minimum DpuScale (1.00 = native scale, below it the runtime has already shrunk what it
+    renders), dropped/late-motion frames and preemptions, minimum free memory, and the highest available
+    latency. **Tear/Early/DR/LM/Preempt are per-second readings, not cumulative counters** -- a 2.4 min
+    run's Preempt series reads 136, 165, 233, 301, 319, 308, 309, 351, 305, 248, ... (64 of 141 samples
+    lower than the one before), so they are summed exactly like Stale, each with a `_seconds` count of
+    how many seconds they were non-zero. Treating them as cumulative overstated dropped frames and
+    preemptions by an order of magnitude. Observed live 2026-09-22/23 on VD H.264 streams at 90 and
+    120 Hz: which fields appear varies by build, so an absent field yields None rather than 0."""
     if not os.path.exists(path):
         return {}
     ts_re = re.compile(r"^(\d\d-\d\d \d\d:\d\d:\d\d\.\d\d\d)\s+\w/VrApi\s*\(\s*(\d+)\)")
@@ -2049,6 +2199,7 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
             if mm:
                 kv[k] = mm.group(1)
         st = re.search(r"Stale2/5/10/max=([\d/]+)", body)
+        lc = LCNT_RE.search(body)
         hh, mm_, ss = map(float, m.group(1).split()[1].split(":"))
         tsec = hh * 3600 + mm_ * 60 + ss
         rows.append({
@@ -2065,6 +2216,24 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
             "temp_c": float(kv.get("Temp", "0C/0C").split("C")[0] or 0),
             "gpu_pct": float(kv.get("GPU%", 0) or 0),
             "pose_age_p95": float(kv.get("PoseAgeP95", 0) or 0),
+            "prd_ms": _num(kv.get("Prd")),
+            "tear": _num(kv.get("Tear")),
+            "early": _num(kv.get("Early")),
+            "vsnc": _num(kv.get("VSnc")),
+            "lat_ms": _num(kv.get("Lat")),
+            "dpu_scale": _num(kv.get("DpuScale")),
+            "dvfs": _num(kv.get("DVFS")),
+            "mem_mhz": _num(kv.get("Mem")),
+            "free_mb": _num(kv.get("Free")),
+            "pls": _num(kv.get("PLS")),
+            "lp": _num(kv.get("LP")),
+            "cabc": _num(kv.get("CABC")),
+            "gd_ms": _num(kv.get("GD")),
+            "cpu_gpu_ms": _num(kv.get("CPU&GPU")),
+            "sf": _num(kv.get("SF")),
+            "preempt": _num(kv.get("Preempt")),
+            "dropped": float(lc.group(1)) if lc else None,
+            "late_motion": float(lc.group(2)) if lc else None,
         })
     if not rows:
         return {"vr_api_lines": 0}
@@ -2083,7 +2252,22 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
             w.writeheader()
             w.writerows(rows)
     fps = [r["fps"] for r in rows]
-    return {
+
+    def _series(key):
+        return [r[key] for r in rows]
+
+    prd = [v for v in _series("prd_ms") if v is not None]
+    dpu = [v for v in _series("dpu_scale") if v is not None]
+    free = [v for v in _series("free_mb") if v is not None]
+    # Lat is -1 when the runtime has no latency figure to report, so negative samples are excluded
+    # rather than averaged in as if they were a real 1 ms below zero.
+    lats = [v for v in _series("lat_ms") if v is not None and v >= 0]
+    tears, tear_s = _bucket_sum(_series("tear"))
+    earlies, early_s = _bucket_sum(_series("early"))
+    dropped, dropped_s = _bucket_sum(_series("dropped"))
+    late_motion, late_motion_s = _bucket_sum(_series("late_motion"))
+    preempts, preempt_s = _bucket_sum(_series("preempt"))
+    out = {
         "vr_api_lines": len(rows), "vr_api_asw_lines": asw, "vr_api_lines_skipped": skipped,
         "vr_api_pid": pid, "vr_api_lines_ignored_other_pid": other,
         "vr_api_fps_mean": round(sum(fps) / len(fps), 2), "vr_api_fps_min": min(fps),
@@ -2099,7 +2283,28 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
         "vr_api_pose_age_p95_max": max(r["pose_age_p95"] for r in rows),
         "vr_api_temp_c_max": max(r["temp_c"] for r in rows),
         "vr_api_gpu_pct_mean": round(sum(r["gpu_pct"] for r in rows) / len(rows), 2),
+        # Panel timing. Tear/Early are per-second counts of frames the panel presented torn, or early
+        # relative to its predicted period; they are 0 in a healthy run and neither is visible in the
+        # Stale counters, which only count frames the compositor never replaced.
+        "vr_api_tear_total": tears, "vr_api_tear_seconds": tear_s,
+        "vr_api_early_total": earlies, "vr_api_early_seconds": early_s,
+        "vr_api_prd_ms_mean": round(sum(prd) / len(prd), 2) if prd else None,
+        "vr_api_prd_ms_max": max(prd) if prd else None,
+        # Quality scaling: 1.00 = the runtime is presenting at native scale; below it, the runtime has
+        # already started shrinking what it renders, before any bitrate change is visible anywhere else.
+        "vr_api_dpu_scale_min": round(min(dpu), 3) if dpu else None,
+        "vr_api_dpu_scale_below_native": sum(1 for v in dpu if v < 0.999) if dpu else None,
+        # The runtime's per-second readings for dropped frames, late motion and preemptions, summed the
+        # same way Stale already is (see _bucket_sum -- these are not cumulative counters). A session
+        # where they only ever read 0 is a session where they never fired; None means the field was
+        # absent from every line (an older build), which is not the same thing.
+        "vr_api_dropped_frames_total": dropped, "vr_api_dropped_seconds": dropped_s,
+        "vr_api_late_motion_total": late_motion, "vr_api_late_motion_seconds": late_motion_s,
+        "vr_api_preempt_total": preempts, "vr_api_preempt_seconds": preempt_s,
+        "vr_api_free_mb_min": min(free) if free else None,
+        "vr_api_lat_ms_max": round(max(lats), 2) if lats else None,
     }
+    return out
 
 
 def tab_deltas(path, cols):
@@ -2375,13 +2580,15 @@ def results(run_id, overlay_path=None):
                                     "(retry/loss, RSSI, thermals, controller link) are null")
     res.update(ovr)
     res.update(ping_stats(os.path.join(run_dir, "ping_samples.txt")))
-    res.update(vr_api_reduce(os.path.join(run_dir, "vr_api_logcat.txt"),
+    logcat_path = os.path.join(run_dir, HEADSET_LOGCAT_NAME)
+    settings = json.load(open(os.path.join(run_dir, "settings.json")))
+    res.update(vr_api_reduce(logcat_path,
                              os.path.join(run_dir, "vr_api_samples.csv"),
                              since_dev_s=vr_start, ref_epoch=vr_start))
-    res.update(codec_stream_reduce(os.path.join(run_dir, "vr_api_logcat.txt"),
+    res.update(codec_stream_reduce(logcat_path,
                                    os.path.join(run_dir, "codec_stream_samples.tsv"),
                                    since_dev_s=vr_start, until_dev_s=sess.get("end_dev_s"),
-                                   ref_epoch=vr_start))
+                                   ref_epoch=vr_start, configured_codec=settings.get("codec")))
     res.update(wifi_retry_bursts(os.path.join(run_dir, "quest_wifi_samples.tsv"),
                                  os.path.join(run_dir, "retry_rate_samples.tsv")))
     res.update({k: v for k, v in tab_deltas(
@@ -2455,7 +2662,7 @@ def results(run_id, overlay_path=None):
 
     json.dump(res, open(os.path.join(run_dir, "results.json"), "w"), indent=1)
 
-    s = json.load(open(os.path.join(run_dir, "settings.json")))
+    s = settings
     id_cols, meas_cols = ID_COLS, MEAS_COLS
     if is_private_run(run_id):
         print(f"private run ({PRIVATE_RUN_PREFIX}* prefix) -- skipping results.csv, results.json only")

@@ -20,6 +20,9 @@
 
   "elev_task": "PCVR-Elev",
 
+  "_headset_log_comment": "Logcat tags streamed from the headset during a session into headset_logcat.txt. Default covers the VR runtime (VrApi, QC2Comp) and the streaming clients (VirtualDesktop.Android, OVRMediaCodec, VR_Engine, ALVR). A tag that never emits costs nothing, so leave it as-is unless a build is chatty or Air Link logs under its own tag -- then add it here (space-separated, logcat filterspecs like 'tag' or 'tag:W' are fine).",
+  "headset_log_tags": "",
+
   "_presentmon_comment": "Optional PC game-fps capture (see tools/Sample-GameFPS.ps1). Leave presentmon_exe empty to skip it. Not vendored -- download the console-app .exe (e.g. PresentMon-2.5.1-x64.exe) from https://github.com/GameTechDev/PresentMon/releases/latest and point presentmon_exe at it. No install/admin needed.",
   "presentmon_exe": "",
   "presentmon_args": "",

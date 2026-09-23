@@ -170,10 +170,12 @@ $samplerJob = Start-Process -FilePath 'powershell.exe' -ArgumentList (@(
 ) + $sfArgs) -PassThru -WindowStyle Hidden
 
 # ---- per-second frame telemetry (any stack, incl. Air Link) ----------------
-# logcat -s VrApi: FPS/Stale/TW/App/CFL/ICFL/PoseAge from the pid owning the VR session. The main
-# logcat buffer only holds ~5 min, so it must be streamed to disk during the cell.
-$logcatFile = Join-Path $runDir 'vr_api_logcat.txt'
-$logcatJob = Start-Process -FilePath $ADB -ArgumentList @('-s', $QuestIp, 'logcat', '-v', 'time', '-s', 'VrApi') `
+# logcat -s <HEADSET_LOG_TAGS>: VrApi gives FPS/Stale/TW/App/CFL/ICFL/PoseAge from the pid owning the
+# VR session; the streaming-client tags carry the client's own bitrate/codec/connection decisions. The
+# main logcat buffer only holds ~5 min, so it must be streamed to disk during the cell.
+$logcatFile = Join-Path $runDir 'headset_logcat.txt'
+$logcatTags = @('VrApi','QC2Comp','VirtualDesktop.Android','OVRMediaCodec','VR_Engine','ALVR')
+$logcatJob = Start-Process -FilePath $ADB -ArgumentList (@('-s', $QuestIp, 'logcat', '-v', 'time', '-s') + $logcatTags) `
     -RedirectStandardOutput $logcatFile -PassThru -WindowStyle Hidden -NoNewWindow
 
 # ---- headset<->PC clock offset --------------------------------------------
