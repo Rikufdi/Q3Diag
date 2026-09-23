@@ -7,7 +7,7 @@ Produces release/dist/Q3Diag-Wizard/ (a folder you can zip and hand to someone -
 release/dist/Q3Diag-Wizard-<version>-win64.zip) containing:
 
   Q3Diag-Wizard.exe          entry point -- packages tools/wizard.py plus everything it imports
-                              (cell.py, qsite.py, dashboard.py, analyze.py) via PyInstaller
+                              (cell.py, qsite.py, devices.py, dashboard.py, analyze.py) via PyInstaller
   _internal/                 bundled Python runtime + the .ps1 samplers + site.example.json
   adb.exe, AdbWinApi.dll,
   AdbWinUsbApi.dll           vendored Android platform-tools (see THIRD_PARTY_NOTICES.md) --

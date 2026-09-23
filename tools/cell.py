@@ -39,16 +39,25 @@ Per-cell device-side instrumentation (all optional files, written into runs/<run
 import sys, os, re, time, json, csv, socket, subprocess
 import qsite
 import analyze
+import devices
 
 ADB = qsite.path("adb")
 QUEST_IP = qsite.get("quest_ip")
-SAMPLER = qsite.script("quest_sampler")
-PC_SAMPLER = qsite.script("pc_sampler")
 BASE = qsite.base_dir()
 TASK = qsite.get("elev_task", "PCVR-Elev")
 RES = os.path.join(qsite.TOOLS_DIR, "elev-do-res.txt")
 CMD = os.path.join(qsite.TOOLS_DIR, "elev-do-cmd.txt")
-OVR_DIR = qsite.get("ovr_metrics_dir")
+
+# Which headset family this run targets, and the names its samplers write -- see devices.py. The
+# Quest's artifact names stay exactly as they were: they are in every existing run folder and in the
+# published docs, so a second device gets its own names instead of renaming these.
+DEVICE = devices.active()
+ARTIFACTS = DEVICE["artifacts"]
+SAMPLER = qsite.script(DEVICE["sampler"]["script"])
+PC_SAMPLER = qsite.script("pc_sampler")
+# site.json's own key wins: it is the documented escape hatch for a rig whose metrics directory moved.
+OVR_DIR = qsite.get("ovr_metrics_dir") or DEVICE["ovr_metrics_dir"]
+WIFI_STATUS_CMD = DEVICE["wifi_status_cmd"]
 
 # The headset logcat stream, and the tags it is filtered to. One stream for two jobs (a session costs
 # one adb reader, not two -- adb traffic shares the very link being measured):
@@ -63,9 +72,8 @@ OVR_DIR = qsite.get("ovr_metrics_dir")
 #     one match attempt and 0 bytes) and would pick up a build that does log there.
 # `headset_log_tags` in site.json (or QUEST3_HEADSET_LOG_TAGS) replaces the list wholesale, e.g. to add
 # `tag:W`-style priority filters, or to drop the client tags on a rig with a chatty build.
-HEADSET_LOGCAT_NAME = "headset_logcat.txt"
-HEADSET_LOG_TAGS = (qsite.get("headset_log_tags") or
-                    "VrApi QC2Comp VirtualDesktop.Android OVRMediaCodec VR_Engine ALVR").split()
+HEADSET_LOGCAT_NAME = ARTIFACTS["logcat"]
+HEADSET_LOG_TAGS = (qsite.get("headset_log_tags") or DEVICE["logcat_tags"]).split()
 
 # ---------------------------------------------------------------- data footprint
 # Measured write rates for the artifacts a run produces, in MB per minute. The wizard and the live
@@ -376,7 +384,7 @@ _SENSITIVE_IP_RE = re.compile(rb"\b(?!192\.168\.49\.)(?:192\.168\.\d{1,3}\.\d{1,
 _SENSITIVE_SSID_RE = re.compile(rb'(SSID:\s*")([^"]+)(")')
 
 
-def redact_artifacts(run_dir, names=("ping_samples.txt", "cm_wifi_snapshots.txt")):
+def redact_artifacts(run_dir, names=("ping_samples.txt", ARTIFACTS["cm"])):
     """Strip network identifiers from the raw-text artifacts of a run, in place. Returns what changed.
 
     The headset sampler redacts as it writes (Protect-Identifiers in Sample-Quest.ps1), but two paths
@@ -452,7 +460,7 @@ def linktest(interval=1.0, rssi_drop_db=8, retry_pct_thresh=5.0, beep=True, head
     try:
         while True:
             t_now = time.time()
-            c = _parse_wifi_status(_adb("-s", ser, "shell", "cmd wifi status"))
+            c = _parse_wifi_status(_adb("-s", ser, "shell", WIFI_STATUS_CMD))
             rssi = c.get("rssi")
             if rssi is not None:
                 hist.append(rssi)
@@ -617,7 +625,23 @@ def _fuzzy_match_process(hint):
 PRESENTMON_HINT_WINDOW_S = 300  # how long after VD/Air Link connects to keep trying to resolve a hint
 
 
-def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_target=None,
+def _sampler_args(run_dir, keys=None, extra=()):
+    """Sample-Quest's switches for this device's profile: each output's flag plus the artifact it writes.
+
+    Which outputs exist is a property of the headset (a controller-link dump only makes sense on
+    hardware that has one), so the list lives in devices.py and both launch sites read it from there
+    instead of each hardcoding its own switches. `keys` narrows it to a subset: capture() collects the
+    link and thermal files plus the SurfaceFlinger pair, and has never taken the controller-link
+    snapshots monitor() does -- folding those in silently would put extra adb traffic on the very link
+    a capture exists to measure."""
+    outputs = DEVICE["sampler"]["outputs"]
+    if keys is not None:
+        outputs = tuple(o for o in outputs if o[1] in keys)
+    args = [a for arg, key in outputs for a in (f"-{arg}", os.path.join(run_dir, ARTIFACTS[key]))]
+    return args + list(extra)
+
+
+def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_target=None,
             presentmon_hint=None, presentmon_capture=True):
     """Open-ended monitoring of a live session (no pktmon: the elevated task is intentionally absent).
     Samples until killed, stopped (`cell.py stop <run_id>` or Ctrl+C), or max_seconds elapses; prints one
@@ -647,6 +671,10 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
     presentmon_target.json -- what the dashboard's "Game exe found" tile reads, and what
     results()/presentmon_reduce() use to report a real number or a graceful "never showed up" note
     instead of a guess."""
+    # The stack is an identity field written into session.json and used by the wizard's detection; the
+    # profile's default is what the command line and the wizard leave it at.
+    if stack is None:
+        stack = DEVICE["default_stack"]
     run_dir = os.path.join(BASE, "runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
     if not os.path.exists(os.path.join(run_dir, "settings.json")):
@@ -674,18 +702,17 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
     print(f"monitor started: {run_id} serial={ser} clock_offset={off:.3f}s uptime={clock.get('dev_uptime_s')}")
 
     files = {k: os.path.join(run_dir, v) for k, v in
-             {"wifi": "quest_wifi_samples.tsv", "net": "quest_net_samples.tsv",
-              "env": "quest_env_samples.tsv", "sf": "sf_latency_samples.tsv",
-              "layers": "sf_layers.log", "logcat": HEADSET_LOGCAT_NAME,
-              "cm": "cm_wifi_snapshots.txt", "pc": "pc_samples.tsv",
-              "ping": "ping_samples.txt", "session": "session.json",
-              "presentmon": "presentmon.csv", "presentmon_target": "presentmon_target.json"}.items()}
+             {**ARTIFACTS, "pc": "pc_samples.tsv", "ping": "ping_samples.txt",
+              "session": "session.json", "presentmon": "presentmon.csv",
+              "presentmon_target": "presentmon_target.json"}.items()}
+    # The headset-side sampler switches come from the profile, so a device without (say) a controller
+    # link is simply not asked for that artifact instead of having a dead sampler flag passed to it.
+    sampler_args = _sampler_args(run_dir)
+    session_cmd = devices.session_cmd(DEVICE)
 
     sampler = subprocess.Popen(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SAMPLER,
-         "-Adb", ADB, "-Serial", ser, "-OutFile", files["wifi"], "-NetFile", files["net"],
-         "-EnvFile", files["env"], "-CmFile", files["cm"],
-         "-Seconds", str(max_seconds + 60)],
+         "-Adb", ADB, "-Serial", ser, *sampler_args, "-Seconds", str(max_seconds + 60)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     logcat = subprocess.Popen([ADB, "-s", ser, "logcat", "-v", "time", "-s", *HEADSET_LOG_TAGS],
                               stdout=open(files["logcat"], "a", encoding="utf-8"), stderr=subprocess.DEVNULL)
@@ -803,8 +830,7 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack="vd", presentmon_t
 
             if now - last_status >= status_every:
                 last_status = now
-                procs = _adb("-s", ser, "shell",
-                             "ps -A -o NAME | grep -E 'VirtualDesktop|xrstreamingclient' | tr '\\n' ' '").strip()
+                procs = _adb("-s", ser, "shell", session_cmd).strip()
                 if procs and current is None:
                     current = {"proc": procs, "start_dev_s": round(time.time() + off, 3)}
                     segments.append(current)
@@ -1147,14 +1173,14 @@ def capture(run_id, duration=150):
 
     print("pktmon-start:", elev(f"pktmon-start {run_dir}"))
 
+    sf_flag, sf_key = DEVICE["sampler"]["sf"]
     sampler = subprocess.Popen(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SAMPLER,
          "-Adb", ADB, "-Serial", ser,
-         "-OutFile", os.path.join(run_dir, "quest_wifi_samples.tsv"),
-         "-NetFile", os.path.join(run_dir, "quest_net_samples.tsv"),
-         "-EnvFile", os.path.join(run_dir, "quest_env_samples.tsv"),
-         "-SfFile", os.path.join(run_dir, "sf_latency_samples.tsv") if sf_layer else "",
-         "-SfLayer", sf_layer or "",
+         *_sampler_args(run_dir, keys=("wifi", "net", "env"),
+                        extra=(f"-{sf_flag}",
+                               os.path.join(run_dir, ARTIFACTS[sf_key]) if sf_layer else "",
+                               "-SfLayer", sf_layer or "")),
          "-Seconds", str(duration + 20)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -1194,7 +1220,7 @@ def capture(run_id, duration=150):
 
 def quest_counters(ser):
     """Cumulative device counters, used to bound a session that was NOT instrumented live."""
-    wifi = _adb("-s", ser, "shell", "cmd wifi status")
+    wifi = _adb("-s", ser, "shell", WIFI_STATUS_CMD)
     dev = _adb("-s", ser, "shell", "cat /proc/net/dev")
     snmp = _adb("-s", ser, "shell", "cat /proc/net/snmp")
     out = _parse_wifi_status(wifi)
@@ -1209,10 +1235,12 @@ def quest_counters(ser):
     return out
 
 
-def passive(run_id, phase, stack="vd"):
+def passive(run_id, phase, stack=None):
     """Zero-perturbation session measurement: `start` snapshots cumulative counters, the session runs with
     NO adb traffic at all, `end` deltas the counters and pulls the OVR CSV the headset writes by itself.
     This is the control arm for 'does live instrumentation change what we measure'."""
+    if stack is None:
+        stack = DEVICE["default_stack"]
     run_dir = os.path.join(BASE, "runs", run_id)
     os.makedirs(run_dir, exist_ok=True)
     ser = adb_serial()
@@ -1249,7 +1277,7 @@ def passive(run_id, phase, stack="vd"):
                     "quest_session_start_dev_s": start.get("dev_epoch_s")})
 
     newest = _adb("-s", ser, "shell", f"ls -t {OVR_DIR} | head -1").strip()
-    ovr_csv = os.path.join(run_dir, "ovr_metrics.csv")
+    ovr_csv = os.path.join(run_dir, ARTIFACTS["ovr"])
     res["ovr_source_file"] = newest or None
     if newest:
         _run([ADB, "-s", ser, "pull", f"{OVR_DIR}/{newest}", ovr_csv])
@@ -1419,7 +1447,7 @@ def detect_band(run_dir, serial=None):
          produced nothing at all.
     """
     counts = {}
-    for row in read_tsv(os.path.join(run_dir, "quest_wifi_samples.tsv")):
+    for row in read_tsv(os.path.join(run_dir, ARTIFACTS["wifi"])):
         b = band_from_freq(row.get("freq_mhz"))
         if b:
             counts[b] = counts.get(b, 0) + 1
@@ -1429,7 +1457,7 @@ def detect_band(run_dir, serial=None):
     if not os.path.isdir(run_dir):
         return None  # not a run at all -- never answer this from the live device
     try:
-        out = _adb("-s", serial or adb_serial(), "shell", "cmd wifi status", timeout=15)
+        out = _adb("-s", serial or adb_serial(), "shell", WIFI_STATUS_CMD, timeout=15)
     except Exception:
         return None
     m = re.search(r"Frequency:\s*(\d+)\s*MHz", out or "")
@@ -1540,7 +1568,7 @@ def cm_reduce(path, session_start_dev_s=None, offset_s=0.0, out_tsv=None):
 
 def _rate_series(run_dir):
     """(epoch, delivered Mbps) from the 2 s wlan0 samples."""
-    rows = [r for r in read_tsv(os.path.join(run_dir, "quest_net_samples.tsv")) if r.get("wlan0_rx_bytes")]
+    rows = [r for r in read_tsv(os.path.join(run_dir, ARTIFACTS["net"])) if r.get("wlan0_rx_bytes")]
     out = []
     for a, b in zip(rows, rows[1:]):
         try:
@@ -2554,7 +2582,7 @@ def results(run_id, overlay_path=None):
         if has_capture else {}
 
     # wifi counter deltas (MAC layer, headset TX direction)
-    rows = read_tsv(os.path.join(run_dir, "quest_wifi_samples.tsv"))
+    rows = read_tsv(os.path.join(run_dir, ARTIFACTS["wifi"]))
     if len(rows) < 2:
         raise RuntimeError("no wifi samples yet in " + run_dir)
 
@@ -2592,7 +2620,7 @@ def results(run_id, overlay_path=None):
     sess = json.load(open(sess_file)) if os.path.exists(sess_file) else {}
     vr_start = sess.get("start_dev_s") or start_dev
     newest = _adb("-s", ser, "shell", f"ls -t {OVR_DIR} | head -1").strip()
-    ovr_csv = os.path.join(run_dir, "ovr_metrics.csv")
+    ovr_csv = os.path.join(run_dir, ARTIFACTS["ovr"])
     if newest:
         _run([ADB, "-s", ser, "pull", f"{OVR_DIR}/{newest}", ovr_csv])
     ovr = {"ovr_source_file": newest or None}
@@ -2648,19 +2676,19 @@ def results(run_id, overlay_path=None):
                                    os.path.join(run_dir, "codec_stream_samples.tsv"),
                                    since_dev_s=vr_start, until_dev_s=sess.get("end_dev_s"),
                                    ref_epoch=vr_start, configured_codec=settings.get("codec")))
-    res.update(wifi_retry_bursts(os.path.join(run_dir, "quest_wifi_samples.tsv"),
+    res.update(wifi_retry_bursts(os.path.join(run_dir, ARTIFACTS["wifi"]),
                                  os.path.join(run_dir, "retry_rate_samples.tsv")))
     res.update({k: v for k, v in tab_deltas(
-        os.path.join(run_dir, "quest_net_samples.tsv"),
+        os.path.join(run_dir, ARTIFACTS["net"]),
         ["tcp_retrans_segs", "tcp_in_errs", "wlan0_rx_errs", "wlan0_rx_drop",
          "wlan0_tx_errs", "wlan0_tx_drop", "tcp_in_segs", "tcp_out_segs"]).items()})
-    res.update(summarize_env(os.path.join(run_dir, "quest_env_samples.tsv")))
-    res.update(sf_stats(os.path.join(run_dir, "sf_latency_samples.tsv")))
-    res.update(p2p_stats(os.path.join(run_dir, "quest_net_samples.tsv")))
+    res.update(summarize_env(os.path.join(run_dir, ARTIFACTS["env"])))
+    res.update(sf_stats(os.path.join(run_dir, ARTIFACTS["sf"])))
+    res.update(p2p_stats(os.path.join(run_dir, ARTIFACTS["net"])))
     res.update(pc_summary(os.path.join(run_dir, "pc_samples.tsv")))
     res.update(decay_events(run_dir, out_tsv=os.path.join(run_dir, "decay_episodes.tsv"),
                             session=sess, off=(clock.get("offset_s") or 0.0)))
-    res.update(cm_reduce(os.path.join(run_dir, "cm_wifi_snapshots.txt"),
+    res.update(cm_reduce(os.path.join(run_dir, ARTIFACTS["cm"]),
                          session_start_dev_s=start_dev,
                          offset_s=(clock.get("offset_s") or 0.0),
                          out_tsv=os.path.join(run_dir, "controller_events.tsv")))

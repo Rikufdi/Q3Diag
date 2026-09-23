@@ -6,6 +6,9 @@
   "pc_ip": "",
   "pc_nic": "",
 
+  "_device_comment": "Which headset family this rig measures: a profile name from tools/devices.py (the profiles that exist are listed there; 'quest3' is the only one run against hardware so far). Empty = quest3. A profile carries what the headset-side samplers ask the device for, which artifacts they write, where its metrics files live, and which streaming client counts as a session -- so supporting a second headset is a new profile in that file, not edits to cell.py.",
+  "device": "",
+
   "adb": "",
   "python": "",
   "tshark": "",
@@ -16,7 +19,9 @@
   "vd_settings_json": "",
   "ovr_server_exe": "",
   "vd_switcher_exe": "",
-  "ovr_metrics_dir": "/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics",
+
+  "_ovr_metrics_comment": "Only an override: the headset's OVR Metrics CSV directory normally comes from the device profile in tools/devices.py (the Quest 3 path, /sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics). Set this if your device keeps that directory somewhere else.",
+  "ovr_metrics_dir": "",
 
   "elev_task": "PCVR-Elev",
 
