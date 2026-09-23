@@ -93,7 +93,13 @@ DEFAULTS = {
     "quest_ip": "",
     "pc_ip": "",
     "elev_task": "PCVR-Elev",
-    "ovr_metrics_dir": "/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics",
+    # Which headset profile devices.py drives; empty means its own default (quest3). Present in
+    # DEFAULTS so QUEST3_DEVICE works like every other key -- config() only offers env overrides for
+    # keys it already knows about.
+    "device": "",
+    # Empty means "the device profile's own path" -- see devices.py. Kept as a key so a rig whose
+    # metrics directory moved can still override it, and so QUEST3_OVR_METRICS_DIR keeps working.
+    "ovr_metrics_dir": "",
     "powershell": "powershell",
     # Optional: PC game frame-time capture (Sample-GameFPS.ps1). Not vendored, but auto-detected from
     # vendor/ (see presentmon_exe()) -- empty means "skip PC game-fps capture".

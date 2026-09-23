@@ -40,6 +40,7 @@ import time
 
 import qsite
 import cell
+import devices
 import linkcheck
 import dashboard
 
@@ -47,7 +48,10 @@ ADB = qsite.path("adb")
 QUEST_IP = qsite.get("quest_ip")
 BASE = qsite.base_dir()
 
-STREAMER_PROCESS_NAMES = ("OVRServer_x64.exe", "VirtualDesktop.Streamer.exe", "VirtualDesktop.Server.exe")
+# The PC-side streaming stack's own processes, for the "is the streamer running" check before a run.
+# Which host processes exist is a property of the link the headset uses, so it comes from the device
+# profile rather than being spelled out here.
+STREAMER_PROCESS_NAMES = cell.DEVICE["pc_streamer_procs"]
 
 # Every run this wizard creates is private by default -- see the module docstring.
 PRIVATE_PREFIX = "priv_"
@@ -248,10 +252,7 @@ def _detect_stack_and_band(run_id):
     if os.path.exists(sess_path):
         segs = json.load(open(sess_path)).get("segments") or []
         proc = segs[0].get("proc", "") if segs else ""
-        if "VirtualDesktop" in proc:
-            stack = "vd"
-        elif "xrstreamingclient" in proc:
-            stack = "airlink"
+        stack = devices.stack_from_proc(proc) or "unknown"
 
     band = cell.detect_band(run_dir) or "unknown"
 

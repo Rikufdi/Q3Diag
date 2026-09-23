@@ -40,7 +40,7 @@ DELIVERED_WINDOW_S = 6
 
 
 def _last_wifi_rate(run_dir, window_s=RETRY_WINDOW_S):
-    rows = cell.read_tsv(os.path.join(run_dir, "quest_wifi_samples.tsv"))
+    rows = cell.read_tsv(os.path.join(run_dir, cell.ARTIFACTS["wifi"]))
     if not rows:
         return {}
     out = {"rssi": rows[-1].get("rssi"), "tx_link_mbps": rows[-1].get("tx_link_mbps"),
@@ -103,11 +103,11 @@ def status(run_id):
     out["trace_on"] = (os.path.exists(os.path.join(run_dir, "trace-state.json"))
                        or os.path.exists(os.path.join(run_dir, "trace.etl")))
     out.update(_last_wifi_rate(run_dir))
-    net = cell.tail_row(os.path.join(run_dir, "quest_net_samples.tsv"))
+    net = cell.tail_row(os.path.join(run_dir, cell.ARTIFACTS["net"]))
     out.update({"wlan0_rx_errs": net.get("wlan0_rx_errs"), "wlan0_rx_drop": net.get("wlan0_rx_drop"),
                 "tcp_retrans_segs": net.get("tcp_retrans_segs"), "p2p0_tx_errs": net.get("p2p0_tx_errs"),
                 "p2p0_rx_errs": net.get("p2p0_rx_errs")})
-    env = cell.tail_row(os.path.join(run_dir, "quest_env_samples.tsv"))
+    env = cell.tail_row(os.path.join(run_dir, cell.ARTIFACTS["env"]))
     out.update({"soc_c": env.get("soc_usr_c"), "gpuss_c": env.get("gpuss_max_c"),
                 "sta_tx_power_dbm": env.get("sta_tx_power_dbm"), "hmd_state": env.get("hmd_state")})
     pc = cell.tail_row(os.path.join(run_dir, "pc_samples.tsv"))
