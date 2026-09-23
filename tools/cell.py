@@ -625,15 +625,19 @@ def _fuzzy_match_process(hint):
 PRESENTMON_HINT_WINDOW_S = 300  # how long after VD/Air Link connects to keep trying to resolve a hint
 
 
-def _sampler_args(run_dir, extra=()):
+def _sampler_args(run_dir, keys=None, extra=()):
     """Sample-Quest's switches for this device's profile: each output's flag plus the artifact it writes.
 
     Which outputs exist is a property of the headset (a controller-link dump only makes sense on
-    hardware that has one), so the list lives in devices.py and both launch sites -- monitor()'s
-    always-on set and capture()'s fixed-duration set with the SurfaceFlinger pair appended -- read it
-    from there instead of each hardcoding its own switches."""
-    args = [a for arg, key in DEVICE["sampler"]["outputs"]
-            for a in (f"-{arg}", os.path.join(run_dir, ARTIFACTS[key]))]
+    hardware that has one), so the list lives in devices.py and both launch sites read it from there
+    instead of each hardcoding its own switches. `keys` narrows it to a subset: capture() collects the
+    link and thermal files plus the SurfaceFlinger pair, and has never taken the controller-link
+    snapshots monitor() does -- folding those in silently would put extra adb traffic on the very link
+    a capture exists to measure."""
+    outputs = DEVICE["sampler"]["outputs"]
+    if keys is not None:
+        outputs = tuple(o for o in outputs if o[1] in keys)
+    args = [a for arg, key in outputs for a in (f"-{arg}", os.path.join(run_dir, ARTIFACTS[key]))]
     return args + list(extra)
 
 
@@ -1173,9 +1177,10 @@ def capture(run_id, duration=150):
     sampler = subprocess.Popen(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SAMPLER,
          "-Adb", ADB, "-Serial", ser,
-         *_sampler_args(run_dir, extra=(f"-{sf_flag}",
-                                        os.path.join(run_dir, ARTIFACTS[sf_key]) if sf_layer else "",
-                                        "-SfLayer", sf_layer or "")),
+         *_sampler_args(run_dir, keys=("wifi", "net", "env"),
+                        extra=(f"-{sf_flag}",
+                               os.path.join(run_dir, ARTIFACTS[sf_key]) if sf_layer else "",
+                               "-SfLayer", sf_layer or "")),
          "-Seconds", str(duration + 20)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
