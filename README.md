@@ -15,8 +15,11 @@ A guided wizard drives it end to end: connect, measure, verdict, baseline. It se
 on localhost for the whole session (the URL is printed when the session starts), so the numbers can be
 watched as they arrive.
 
-Two optional extras, both off unless asked for: a Windows Performance Recorder trace for attributing
-stalls, and a pre-session iperf3 link-capacity check (TCP both ways, then a UDP ramp).
+Two optional extras, both off unless asked for and both needing a tool you supply (see *Optional extra
+capture*): the game's own frame times through PresentMon, and a pre-session iperf3 link-capacity check
+(TCP both ways, then a UDP ramp). A Windows Performance Recorder trace for attributing stalls is built
+in and likewise off by default — but it perturbs the session it measures and writes ~1.3 GB per minute,
+so read its warning below before enabling it.
 
 Windows-only, and everything a session records is written under runs/<run_id>/, stays local, and is
 excluded from git.
