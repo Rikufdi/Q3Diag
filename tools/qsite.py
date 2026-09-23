@@ -143,6 +143,33 @@ def get(key, default=None):
     return config().get(key, default)
 
 
+def save(values):
+    """Persist keys into the site profile (site.json next to the exe, or tools/site.json in a checkout),
+    creating it from site.example.json's template when it does not exist yet. Returns the keys whose
+    value actually changed, so callers can stay quiet when there was nothing to do.
+
+    This is the one writer for the profile: the wizard's USB handoff used to carry its own copy of this
+    read-modify-write, and the adb endpoint resolution in cell.py needed the same thing. Resets the
+    in-process cache, so a `get()` after a `save()` in the same process sees the new value -- callers
+    that cached the value in their own module global (cell.QUEST_IP, wizard.QUEST_IP) still have to
+    patch that themselves."""
+    global _CONFIG
+    path = CONFIG_PATH
+    doc = {}
+    if exists(path):
+        doc = _read_json(path)
+    elif exists(EXAMPLE_PATH):
+        doc = _read_json(EXAMPLE_PATH)
+    changed = {k: v for k, v in values.items() if doc.get(k) != v}
+    if not changed:
+        return {}
+    doc.update(changed)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=1)
+    _CONFIG = None
+    return changed
+
+
 def base_dir():
     return config()["base_dir"]
 

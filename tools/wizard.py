@@ -217,30 +217,19 @@ def _discover_and_save_ip(serial):
     run needs no manual config file at all, just this USB connection once. Persists to tools/site.json
     so future runs skip USB entirely (see the Wi-Fi-first path in ensure_headset_connected), and
     patches the already-imported cell/qsite modules in-process since their QUEST_IP was read once at
-    import time and won't otherwise see a config file written after that."""
-    out = subprocess.run([ADB, "-s", serial, "shell", "ip", "-f", "inet", "addr", "show", "wlan0"],
-                         capture_output=True, text=True).stdout
-    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/", out)
-    if not m:
+    import time and won't otherwise see a config file written after that. The device probe and the
+    write both live in cell/qsite now, shared with the endpoint resolution cell.adb_serial() does for
+    the non-interactive paths."""
+    ip = cell.headset_wifi_ip(serial)
+    if not ip:
         print("  (couldn't read the headset's Wi-Fi IP automatically -- falling back to site.json's)")
         return None
-    ip = m.group(1)
-
-    site_path = qsite.CONFIG_PATH  # not TOOLS_DIR -- see qsite.PERSIST_DIR for why they can differ
-    site = {}
-    if os.path.exists(site_path):
-        site = json.load(open(site_path))
-    elif os.path.exists(qsite.EXAMPLE_PATH):
-        site = json.load(open(qsite.EXAMPLE_PATH))
-    if site.get("quest_ip") != ip:
-        site["quest_ip"] = ip
-        json.dump(site, open(site_path, "w"), indent=1)
-        print(f"  discovered headset IP {ip} -- saved to {site_path}")
+    if qsite.save({"quest_ip": ip}):     # also clears qsite's cached config, so later get() sees it
+        print(f"  discovered headset IP {ip} -- saved to {qsite.CONFIG_PATH}")
 
     global QUEST_IP
     QUEST_IP = ip
     cell.QUEST_IP = ip
-    qsite._CONFIG = None  # force other qsite.get() calls in this process to pick up the new value too
     return ip
 
 

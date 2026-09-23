@@ -979,19 +979,71 @@ def read_tsv(path):
     return list(csv.DictReader(txt.splitlines(), delimiter="\t")) if txt.strip() else []
 
 
+def _attached():
+    """Serials of every device adb currently has in the `device` state (any transport)."""
+    out = []
+    for line in _adb("devices").splitlines():
+        if re.search(r"\sdevice\s*$", line):
+            out.append(line.split("\t")[0].strip())
+    return out
+
+
+def headset_wifi_ip(serial):
+    """The headset's own wlan0 IPv4 address, read straight off the device over any working transport --
+    the same probe the wizard's USB handoff uses to bootstrap site.json. None when it can't be read."""
+    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/",
+                  _adb("-s", serial, "shell", "ip", "-f", "inet", "addr", "show", "wlan0"))
+    return m.group(1) if m else None
+
+
+def _adopt_serial(ser):
+    """Keep QUEST_IP pointing at the headset the resolved endpoint actually belongs to.
+
+    site.json's quest_ip is only ever correct for the network the headset was last paired on, and the
+    operator changes networks. It feeds the 1 Hz ping in monitor()/capture() and the wire-window
+    analysis in analyze.reduce_cell(), so a stale value there does not fail loudly -- it records a
+    session's worth of ping timeouts and attributes the wire window to the wrong address. A wireless
+    endpoint carries the IP directly; a USB-only endpoint gets it read off the device. Persisted the
+    same way the wizard persists its discovery, so the next run starts from the right place."""
+    global QUEST_IP
+    ip = ser.split(":")[0] if ":" in ser else headset_wifi_ip(ser)
+    if not ip:
+        print(f"using {ser} over USB (could not read the headset's Wi-Fi IP -- ping keeps "
+              f"site.json's {QUEST_IP})")
+        return ser
+    if ip == QUEST_IP:
+        if ":" not in ser:
+            print(f"using {ser} over USB; ping still targets the Wi-Fi IP {QUEST_IP}")
+        return ser
+    changed = qsite.save({"quest_ip": ip})
+    print(f"using {ser}: the headset's Wi-Fi IP is {ip}, site.json had {QUEST_IP}"
+          + (f" -- saved to {qsite.CONFIG_PATH}" if changed else
+             " -- not written (site.json already says so, or QUEST3_QUEST_IP overrides it)"))
+    QUEST_IP = ip
+    return ser
+
+
 def adb_serial(refresh=False):
     """Resolve the wireless-adb endpoint. The 5555 tcpip port dies with every headset reboot;
-    the Android 11+ Wireless Debugging endpoint only advertises over mDNS."""
+    the Android 11+ Wireless Debugging endpoint only advertises over mDNS.
+
+    Resolution order: the endpoint site.json names (attached, else a fresh `connect`), then mDNS
+    wireless-debugging discovery, then -- new -- any device the adb server already has attached,
+    wireless preferred. That last step exists because the first two are both anchored to the configured
+    IP: on 2026-09-23 a `cell.py results` run died with "no Quest reachable: tried 192.168.1.30:5555"
+    while `adb devices` was listing two perfectly good endpoints for that headset (its USB serial and
+    192.168.8.104:5555), because `attached(QUEST_IP)` discards anything whose serial does not start
+    with that stale IP. The wizard's USB handoff and a plain `adb connect` both leave entries in adb's
+    own list, so refusing to read it was the bug, not a missing discovery mechanism."""
     global _serial_cache
     if _serial_cache and not refresh:
         return _serial_cache
 
     def attached(prefix=None):
-        for line in _adb("devices").splitlines():
-            if re.search(r"\sdevice\s*$", line):
-                s = line.split("\t")[0].strip()
-                if not prefix or s.startswith(prefix):
-                    return s
+        for s in _attached():
+            # `prefix + ":"`, not a bare prefix: "192.168.8.10" must not match "192.168.8.104:5555".
+            if not prefix or s == prefix or s.startswith(prefix + ":"):
+                return s
         return None
 
     ser = attached(QUEST_IP)
@@ -1007,7 +1059,14 @@ def adb_serial(refresh=False):
             _adb("connect", svc)
             ser = attached(QUEST_IP)
     if not ser:
-        raise RuntimeError(f"no Quest reachable: tried {QUEST_IP}:5555 and mDNS _adb-tls-connect")
+        devs = _attached()
+        ser = next((d for d in devs if ":" in d), devs[0] if devs else None)
+        if ser:
+            ser = _adopt_serial(ser)
+    if not ser:
+        raise RuntimeError(f"no Quest reachable: tried {QUEST_IP}:5555, mDNS _adb-tls-connect, and "
+                           f"the adb server's device list (nothing attached -- one USB connection "
+                           f"re-pairs it; see README Setup)")
     _serial_cache = ser
     return ser
 
