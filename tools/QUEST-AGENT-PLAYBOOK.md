@@ -236,7 +236,10 @@ Panel/quality and codec identity, in the artifacts:
 - `codec_stream_codec` / `codec_stream_low_latency` / `codec_stream_bit_depth` come from the QC2Comp
   instance name (`[avcDLowLat_39]` = H.264 low-latency, instance 39). **Bit depth is only set when the
   name says "10"** — absence is not evidence of 8-bit, except for H.264, which VD has no 10-bit variant
-  of (`vd-codec-enum.md`).
+  of (`vd-codec-enum.md`). **VD does not put the marker there for HEVC either**: a stream configured
+  HEVC 10-bit (`PreferredCodec 6`) decoded on `[hevcDLowLat_55]` (2026-09-23), so this key stays `null`
+  for a 10-bit stream, and a silent HEVC-10->HEVC-8 fallback is invisible to
+  `codec_stream_codec_mismatch` too — both are family HEVC.
 - `codec_stream_codec_mismatch` compares that against `settings.json`'s codec (VD's PreferredCodec
   display name); a mismatch gets a `codec_stream_codec_note` saying the stream fell back. **In practice
   this key is usually `null`**: the wizard's own runs always write `codec: auto` (it says the codec is
