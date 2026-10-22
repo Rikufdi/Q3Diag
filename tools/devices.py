@@ -61,7 +61,8 @@ PROFILES = {
         # and carries the codec identity in its instance name. The client tags are captured
         # opportunistically -- see cell.py's comment and QUEST-AGENT-PLAYBOOK.md for why they are
         # expected to be silent on this rig.
-        "logcat_tags": "VrApi QC2Comp VirtualDesktop.Android OVRMediaCodec VR_Engine ALVR",
+        "logcat_tags": ("VrApi QC2Comp VirtualDesktop.Android OVRMediaCodec VR_Engine ALVR "
+                        "Unity OpenXR"),
 
         # WifiInfo: RSSI, link speeds, freq and the four MAC counters the harness reduces. AOSP
         # `cmd wifi`, so any Android headset answers the same shape.
@@ -80,6 +81,10 @@ PROFILES = {
             "logcat": "headset_logcat.txt",
             "cm": "cm_wifi_snapshots.txt",
             "ovr": "ovr_metrics.csv",
+            # Written by monitor(--threads)'s own sampler thread, not by Sample-Quest.
+            "threads": "quest_threads.tsv",
+            "thermal": "thermal_service.txt",
+            "mem": "quest_mem.tsv",
         },
     },
 }

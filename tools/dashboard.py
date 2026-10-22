@@ -90,6 +90,16 @@ def _dir_size_mb(path):
     return round(total / (1024 * 1024), 1)
 
 
+def _shell_pids(run_dir):
+    """pids monitor() recorded for the home shell. Its VrApi lines sit next to the app's/client's, so the
+    live fps tile must skip them (same exclusion as cell.vr_api_reduce) -- otherwise a standalone session
+    shows vrshell's healthy home-environment frame numbers instead of the game's."""
+    try:
+        return set(json.load(open(os.path.join(run_dir, "clock.json"))).get("shell_pid") or ())
+    except (OSError, ValueError):
+        return set()
+
+
 def status(run_id):
     run_dir = os.path.join(BASE, "runs", run_id)
     out = {"run_id": run_id, "updated_at": time.strftime("%H:%M:%S"),
@@ -113,7 +123,8 @@ def status(run_id):
     pc = cell.tail_row(os.path.join(run_dir, "pc_samples.tsv"))
     out.update({"enc_util_pct": pc.get("enc_util_pct"), "gpu_util_pct": pc.get("gpu_util_pct"),
                 "pc_tcp_retrans_per_s": pc.get("tcp_retrans_per_s"), "streamer_ws_mb": pc.get("streamer_ws_mb")})
-    out["vrapi"] = cell.vrapi_tail(os.path.join(run_dir, cell.HEADSET_LOGCAT_NAME))
+    out["vrapi"] = cell.vrapi_tail(os.path.join(run_dir, cell.HEADSET_LOGCAT_NAME),
+                                   exclude_pids=_shell_pids(run_dir))
     pr, pt = cell.ping_counts(os.path.join(run_dir, "ping_samples.txt"))
     out["ping_replies"], out["ping_timeouts"] = pr, pt
     try:

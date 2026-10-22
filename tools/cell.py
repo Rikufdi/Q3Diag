@@ -36,7 +36,7 @@ Per-cell device-side instrumentation (all optional files, written into runs/<run
                           them as a bonus for other builds, not as the source of bitrate/connection data
   clock.json              headset<->PC clock offset + device uptime at capture time
 """
-import sys, os, re, time, json, csv, socket, subprocess
+import sys, os, re, time, json, csv, socket, subprocess, threading
 import qsite
 import analyze
 import devices
@@ -641,8 +641,82 @@ def _sampler_args(run_dir, keys=None, extra=()):
     return args + list(extra)
 
 
+THREAD_TOP_ROWS = 30      # threads kept per sample; >20 leaves room for the system's own churn
+THREAD_THERMAL_EVERY_S = 30.0
+
+
+def _thread_sampler(ser, run_dir, stop, interval=2.0):
+    """Device-wide per-thread CPU (`top -H`) + `dumpsys thermalservice`, for attributing frame loss.
+
+    The compositor counters in the headset logcat say THAT frames arrive late; they never say which
+    thread spent the time, and nothing else in this harness separates an app thread from a system one.
+    Measured 2026-10-21 on a standalone Walkabout session: 84.8 fps with 7 stale frames/s in 97 % of
+    seconds while GPU utilization stayed at 35 % and the GPU clock sat at its maximum -- resource totals
+    say "idle", so the only useful next fact is which thread is eating the frame. thermalservice is
+    included because its `Thermal Status:` is the authoritative throttle state; the temperature
+    readings OVR reports cannot distinguish warm from throttled."""
+    threads_path = os.path.join(run_dir, ARTIFACTS["threads"])
+    thermals_path = os.path.join(run_dir, ARTIFACTS["thermal"])
+    mem_path = os.path.join(run_dir, ARTIFACTS["mem"])
+    if not os.path.exists(threads_path):
+        with open(threads_path, "w", encoding="utf-8") as f:
+            f.write("timestamp\ttid\tthread\tprocess\tcpu_pct\tmem_pct\n")
+    if not os.path.exists(mem_path):
+        with open(mem_path, "w", encoding="utf-8") as f:
+            f.write("timestamp\tmem_available_kb\tswap_free_kb\tpgmajfault\tpswpin\tpswpout\n")
+    nxt_thermal = 0.0
+    while not stop.wait(interval):
+        # -n 2 -d 1: the first batch's %CPU is measured against process start, so it shows the sampler
+        # itself at tens of percent and the *CPU hogs of the last hour*, not of the interval. Only the
+        # last table is a real per-interval reading.
+        out = _adb("-s", ser, "shell", f"top -H -b -n 2 -d 1 -m {THREAD_TOP_ROWS}")
+        lines = out.splitlines()
+        hdr = [i for i, l in enumerate(lines) if l.strip().startswith("TID USER")]
+        rows, stamp = [], time.strftime("%Y-%m-%d %H:%M:%S")
+        for line in (lines[hdr[-1] + 1:] if hdr else lines):
+            parts = line.split()
+            if len(parts) < 12 or not parts[0].isdigit():
+                continue
+            try:
+                cpu, mem = float(parts[8]), float(parts[9])
+            except ValueError:
+                continue
+            thread, process = parts[-2], parts[-1]
+            if "top" in (thread, process):
+                continue
+            rows.append((stamp, parts[0], thread, process, cpu, mem))
+        if rows:
+            with open(threads_path, "a", encoding="utf-8") as f:
+                for r in rows:
+                    f.write("\t".join(str(x) for x in r) + "\n")
+        # Memory pressure, because the freeze class this sampler exists for came with kswapd activity:
+        # a standalone title holds ~3.0-3.4 GB of a 7.9 GB device and free memory fell to 871 MB with
+        # swap in use (2026-10-21), so "was the frame late because the thread was paged out" needs its
+        # own evidence. Counters are raw; deltas are the reader's job.
+        mem = _adb("-s", ser, "shell",
+                   "grep -E '^(MemAvailable|SwapFree):' /proc/meminfo; "
+                   "grep -E '^(pgmajfault|pswpin|pswpout) ' /proc/vmstat")
+        kv = {}
+        for line in mem.splitlines():
+            parts = line.replace(":", " ").split()
+            if len(parts) >= 2:
+                kv[parts[0]] = parts[1]
+        with open(mem_path, "a", encoding="utf-8") as f:
+            f.write("\t".join([stamp, kv.get("MemAvailable", ""), kv.get("SwapFree", ""),
+                               kv.get("pgmajfault", ""), kv.get("pswpin", ""), kv.get("pswpout", "")]) + "\n")
+        if time.time() >= nxt_thermal:
+            nxt_thermal = time.time() + THREAD_THERMAL_EVERY_S
+            dump = _adb("-s", ser, "shell", "dumpsys thermalservice")
+            status = re.search(r"Thermal Status:\s*(\d+)", dump)
+            with open(thermals_path, "a", encoding="utf-8") as f:
+                f.write(f"=== {stamp} Thermal Status: {status.group(1) if status else '?'}\n")
+                for line in dump.splitlines():
+                    if "mStatus=" in line or line.strip().startswith("Thermal Status"):
+                        f.write(line.strip() + "\n")
+
+
 def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_target=None,
-            presentmon_hint=None, presentmon_capture=True):
+            presentmon_hint=None, presentmon_capture=True, sample_sf=True, sample_threads=False):
     """Open-ended monitoring of a live session (no pktmon: the elevated task is intentionally absent).
     Samples until killed, stopped (`cell.py stop <run_id>` or Ctrl+C), or max_seconds elapses; prints one
     status line per status_every, and detects the streaming client's start/stop so the reduction can
@@ -695,6 +769,12 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_t
     clock = clock_sample(ser)
     off = clock.get("offset_s") or 0.0
     start_dev = time.time() + off
+    # The home shell emits its own VrApi lines; its pid is recorded here because results() runs after
+    # the session and would otherwise have to recognise the shell from a pid alone, or from a `pidof`
+    # taken minutes later (invalid across a headset reboot). Discovered while adding standalone
+    # monitoring: the app and vrshell both log at 1 Hz, so dominance alone picked the shell's healthy
+    # 90 fps over the app's real numbers.
+    clock["shell_pid"] = sorted(shell_pids(ser))
     # Write the window immediately: a hard kill (hub stop) skips the finally block, and without this file
     # the run has no clock offset and no cell window in its results.
     clock["cell_start_dev_s"] = round(start_dev, 3)
@@ -767,6 +847,13 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_t
         print("PresentMon: none found -- skipping PC-side fps collection "
               "(drop PresentMon.exe in vendor/ to enable it).")
 
+    thread_stop = threading.Event()
+    thread_proc = None
+    if sample_threads:
+        thread_proc = threading.Thread(target=_thread_sampler, args=(ser, run_dir, thread_stop),
+                                       daemon=True)
+        thread_proc.start()
+        print(f"per-thread CPU + thermalservice sampling -> {files['threads']}")
     start_dev = time.time() + off
     sf_layer, sf_prev, sf_next, sf_found_at = None, 0, 0.0, 0.0
     # segments: every VD/Air Link app start..stop the process-presence check observes during this monitor
@@ -807,7 +894,7 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_t
                 print(f"[{time.strftime('%H:%M:%S')}] stop requested ({stop_path}) -- shutting down cleanly")
                 break
             now = time.time()
-            if now >= sf_next:
+            if sample_sf and now >= sf_next:
                 if sf_layer is None or now - sf_found_at > 20:
                     found = find_sf_layer(ser, settle_s=1.0)
                     if found != sf_layer and found:
@@ -883,7 +970,7 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_t
                               "the session starting -- giving up")
                 wifi = tail_row(files["wifi"], 10)
                 net = tail_row(files["net"], 30)
-                vrapi = vrapi_tail(files["logcat"])
+                vrapi = vrapi_tail(files["logcat"], exclude_pids=clock.get("shell_pid"))
                 pr, pt = ping_counts(files["ping"])
                 print(f"[{time.strftime('%H:%M:%S')}] t={(time.time()-(start_dev-off))/60:6.1f}min "
                       f"rssi={wifi.get('rssi','-')} link={wifi.get('tx_link_mbps','-')} "
@@ -916,6 +1003,9 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_t
                 p.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 p.kill()
+        thread_stop.set()
+        if thread_proc is not None:
+            thread_proc.join(timeout=30)
         # Samplers are dead, so nothing is appending any more: scrub the raw-text artifacts here as
         # well as at write time in the sampler. This is the path that also covers ping_samples.txt
         # (written by our own redirect) and any run the sampler did not exit cleanly from.
@@ -956,20 +1046,75 @@ def tail_row(path, n=1):
     return {}
 
 
-def vrapi_tail(path, n=4000):
-    """Compact 'fps/stale' from the newest VrApi line in the streamed logcat file."""
+TAIL_FRESH_S = 30.0   # how recent a non-shell VrApi line must be to count as "the app is running"
+
+
+def _log_clock_s(line):
+    """Seconds of day from a logcat 'MM-DD HH:MM:SS.mmm' prefix, or None when the line has no timestamp."""
+    m = re.match(r"^\d\d-\d\d (\d\d):(\d\d):(\d\d\.\d+)", line)
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else None
+
+
+def _dev_sod(path):
+    """Seconds-of-day on the headset for the run next to `path` (clock.json offset applied), or None."""
+    try:
+        off = json.load(open(os.path.join(os.path.dirname(path), "clock.json"))).get("offset_s") or 0.0
+    except (OSError, ValueError):
+        return None
+    lt = time.localtime(time.time() + off)
+    now = time.time() + off
+    return lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec + (now - int(now))
+
+
+def vrapi_tail(path, n=4000, exclude_pids=None):
+    """Compact 'fps/stale' from the newest VrApi line in the streamed logcat file, preferring an
+    emitter other than the home shell (see vr_api_reduce) so the live status line shows the app's
+    numbers during standalone play instead of vrshell's healthy home-environment ones.
+
+    Two fresh-readings guards, both needed: the file's own mtime must be recent, because a headset that
+    drops into standby stops logging VrApi entirely and its last reading would otherwise be shown as
+    live (confirmed 2026-10-21, the file stopped growing for minutes while adb and the Wi-Fi samplers
+    still worked); and a non-shell line must be within TAIL_FRESH_S of the newest line, because an app
+    that was just closed leaves older lines that stay "the newest non-shell ones" forever. In both
+    cases the honest answer is 'fps=-'."""
     if not os.path.exists(path):
         return "fps=-,stale=-"
     txt = _read_text(path)
     if not txt:
         return "fps=-,stale=-"
-    lines = txt[-(n * 150):].splitlines()
-    for line in reversed(lines):
-        if " FPS=" in line:
-            fps = re.search(r"FPS=(\d+)/", line)
-            stale = re.search(r"(?:^|,)Stale=(\d+)", line)
-            return f"fps={fps.group(1) if fps else '-'},stale={stale.group(1) if stale else '-'}"
-    return "fps=-,stale=-"
+    lines = [l for l in txt[-(n * 150):].splitlines() if " FPS=" in l]
+    if not lines:
+        return "fps=-,stale=-"
+    if time.time() - os.path.getmtime(path) > TAIL_FRESH_S:
+        return "fps=-,stale=-"
+    newest = _log_clock_s(lines[-1])
+    now = _dev_sod(path)
+    # A monitor that just started writes the previous ~5 min of backlog into a brand-new file, so the
+    # mtime says "live" while the newest line can be minutes old; compare against the headset clock too
+    # (same timezone as the PC here -- a wrong zone would read as stale, never as a wrong number).
+    if newest is not None and now is not None:
+        age = now - newest
+        if age < -1.0:                # stamped just after the clock sample, or across local midnight
+            age %= 86400.0
+        if age > TAIL_FRESH_S:
+            return "fps=-,stale=-"
+
+    def recent(t):
+        return t is not None and (newest is None or newest - t <= TAIL_FRESH_S)
+
+    selected = lines[-1]
+    excluded = set(exclude_pids or ())
+    if excluded:
+        for line in reversed(lines):
+            if not recent(_log_clock_s(line)):
+                break
+            pm = re.search(r"\(\s*(\d+)\)", line)
+            if pm and int(pm.group(1)) not in excluded:
+                selected = line
+                break
+    fps = re.search(r"FPS=(\d+)/", selected)
+    stale = re.search(r"(?:^|,)Stale=(\d+)", selected)
+    return f"fps={fps.group(1) if fps else '-'},stale={stale.group(1) if stale else '-'}"
 
 
 def ping_counts(path):
@@ -1095,6 +1240,13 @@ def adb_serial(refresh=False):
                            f"re-pairs it; see README Setup)")
     _serial_cache = ser
     return ser
+
+
+def shell_pids(ser):
+    """pids of the home shell (com.oculus.vrshell and its :shellui process). It logs its own VrApi
+    lines next to whatever owns the VR session, so reducers exclude it when a real emitter exists."""
+    out = _adb("-s", ser, "shell", "pidof com.oculus.vrshell").split()
+    return {int(x) for x in out if x.isdigit()}
 
 
 def elev(cmd):
@@ -2242,8 +2394,9 @@ def codec_stream_reduce(path, out_tsv=None, since_dev_s=None, until_dev_s=None, 
     return out
 
 
-def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
-    """logcat -s VrApi emits one line per second from the pid owning the VR session:
+def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None, exclude_pids=None):
+    """logcat -s VrApi emits one line per second from every pid owning a VR session (the streaming
+       client during PCVR, the running app during standalone play, and always vrshell):
        FPS=90/90,...,Stale=0,Stale2/5/10/max=0/0/0/0,...,TW=1.77ms,App=1.46ms,...,CFL=12.54/16.83,
        ICFLp95=15.81,...,Temp=38.0C/0.0C,...,GPU%=0.31,PoseAgeP95=0.00
        plus a parallel ASW= line. This is the only frame telemetry that also covers Air Link.
@@ -2324,11 +2477,19 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
         })
     if not rows:
         return {"vr_api_lines": 0}
-    # Two processes can emit VrApi lines (the VR session owner and vrshell): keep the dominant emitter so
-    # the series is not a mix of two frame pipelines.
+    # Several processes can emit VrApi lines (the VR session owner, an app under it, and always
+    # vrshell): keep one emitter so the series is not a mix of two frame pipelines. Dominance alone was
+    # wrong for standalone play, where the app and vrshell both log at 1 Hz and vrshell -- whose numbers
+    # are the home environment's healthy 90 fps -- wins whenever the app logs fewer lines (launch gap,
+    # loading screen). Confirmed 2026-10-21: a standalone app pid logged 22 lines to vrshell's 26 in a
+    # 25 s window. exclude_pids names the shell, so the app is preferred whenever one is present, and
+    # dominance still decides between two real ones (PCVR keeps the client over vrshell that way).
     from collections import Counter
-    pid = Counter(r["pid"] for r in rows).most_common(1)[0][0]
-    other = len(rows) - sum(1 for r in rows if r["pid"] == pid)
+    counts = Counter(r["pid"] for r in rows)
+    excluded = set(exclude_pids or ())
+    cand = [p for p in counts if p not in excluded] or list(counts)
+    pid = max(cand, key=lambda p: counts[p])
+    other = len(rows) - counts[pid]
     rows = [r for r in rows if r["pid"] == pid]
     t0 = rows[0]["t_s"]
     for r in rows:
@@ -2339,6 +2500,12 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
             w.writeheader()
             w.writerows(rows)
     fps = [r["fps"] for r in rows]
+    apps = [r["app_ms"] for r in rows]
+    stale_secs = sum(1 for r in rows if r["stale"] > 0)
+
+    def pctl(v, p):
+        s = sorted(v)
+        return round(s[min(len(s) - 1, int(len(s) * p / 100))], 3)
 
     def _series(key):
         return [r[key] for r in rows]
@@ -2360,10 +2527,18 @@ def vr_api_reduce(path, out_csv=None, since_dev_s=None, ref_epoch=None):
         "vr_api_fps_mean": round(sum(fps) / len(fps), 2), "vr_api_fps_min": min(fps),
         "vr_api_seconds_below_85fps": sum(1 for x in fps if x < 85),
         "vr_api_stale_total": int(sum(r["stale"] for r in rows)),
-        "vr_api_stale_seconds": sum(1 for r in rows if r["stale"] > 0),
+        "vr_api_stale_seconds": stale_secs,
+        # Share of sampled seconds that carried at least one stale frame. The absolute count alone says
+        # nothing about how much of the session was affected, which is the question a reader actually has.
+        "vr_api_stale_seconds_pct": round(100 * stale_secs / len(rows), 1),
         "vr_api_stale_max_consecutive": max(r["stale_max"] for r in rows),
         "vr_api_tw_ms_mean": round(sum(r["tw_ms"] for r in rows) / len(rows), 3),
-        "vr_api_app_ms_mean": round(sum(r["app_ms"] for r in rows) / len(rows), 3),
+        # Mean only, with a median/p95 next to it: the first frames of an app's own session report App
+        # as time-since-app-start, so measured 2026-10-21 a single in-game session had two launch samples
+        # at 68825 ms against a 3.1 ms per-frame median -- the mean came out at 52.5 ms and was quoted as
+        # if it were per-frame cost. The percentiles are the honest per-frame figures.
+        "vr_api_app_ms_mean": round(sum(apps) / len(apps), 3),
+        "vr_api_app_ms_median": pctl(apps, 50), "vr_api_app_ms_p95": pctl(apps, 95),
         "vr_api_cfl_ms_mean": round(sum(r["cfl_ms"] for r in rows) / len(rows), 3),
         "vr_api_icfl_p95_ms_mean": round(sum(r["icfl_p95_ms"] for r in rows) / len(rows), 3),
         "vr_api_icfl_p95_ms_max": max(r["icfl_p95_ms"] for r in rows),
@@ -2669,9 +2844,14 @@ def results(run_id, overlay_path=None):
     res.update(ping_stats(os.path.join(run_dir, "ping_samples.txt")))
     logcat_path = os.path.join(run_dir, HEADSET_LOGCAT_NAME)
     settings = json.load(open(os.path.join(run_dir, "settings.json")))
+    # vrshell logs its own VrApi lines next to the app's (see vr_api_reduce); keep it out so the
+    # headline fps/stale numbers belong to whatever owned the VR session. Union of the pid recorded at
+    # monitor start (survives a headset reboot, where a fresh pidof would name the wrong process) and
+    # whatever vrshell is now.
+    shell = set(clock.get("shell_pid") or ()) | shell_pids(ser)
     res.update(vr_api_reduce(logcat_path,
                              os.path.join(run_dir, "vr_api_samples.csv"),
-                             since_dev_s=vr_start, ref_epoch=vr_start))
+                             since_dev_s=vr_start, ref_epoch=vr_start, exclude_pids=shell))
     res.update(codec_stream_reduce(logcat_path,
                                    os.path.join(run_dir, "codec_stream_samples.tsv"),
                                    since_dev_s=vr_start, until_dev_s=sess.get("end_dev_s"),
@@ -2772,7 +2952,12 @@ if __name__ == "__main__":
         ser = adb_serial()
         print(find_sf_layer(ser) or "")
     elif sys.argv[1] == "monitor":
-        monitor(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 10800)
+        flags = [a for a in sys.argv[2:] if a.startswith("--")]
+        pos = [a for a in sys.argv[2:] if not a.startswith("--")]
+        monitor(pos[0], int(pos[1]) if len(pos) > 1 else 10800,
+                presentmon_capture=("--no-presentmon" not in flags),
+                sample_sf=("--no-sf" not in flags),
+                sample_threads=("--threads" in flags))
     elif sys.argv[1] == "stop":
         stop_monitor(sys.argv[2])
     elif sys.argv[1] == "watch":
