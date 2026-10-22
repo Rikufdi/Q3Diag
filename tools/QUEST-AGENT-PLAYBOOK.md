@@ -353,6 +353,58 @@ dominant non-streamer/non-OS process in the window as "the game" and reports
 version; the reducer reads whichever known column-name variant is present and the sampler script
 documents how to override the launch args via `presentmon_args` if a build's flags differ.
 
+## 7c. Standalone (native) play — no PC in the loop (2026-10-21)
+
+A standalone session is the same capture minus everything that needs a stream:
+
+```powershell
+python tools/cell.py monitor <run_id> 10800 --no-presentmon --no-sf
+python tools/dashboard.py <run_id>          # http://127.0.0.1:8765/
+python tools/cell.py stop <run_id>
+python tools/cell.py results <run_id>
+```
+
+Verified on a Quest 3 running a standalone title:
+
+- The app logs its own `VrApi` line at 1 Hz from its own pid — FPS/Stale/App/TW/GPU% — so `vr_api_*` is
+  the frame-health series for a native game, with exactly the parser the PCVR path uses.
+- `com.oculus.vrshell` logs a **second** `VrApi` line at the same rate. Dominance-based pid selection
+  (the old rule) took whichever had more lines: measured 22 app lines to 26 shell lines in a 25 s window,
+  i.e. the shell's healthy 90 fps / Stale=0 could stand in for the game's numbers. `shell_pids()` now
+  records the shell pid into `clock.json` at monitor start, `vr_api_reduce(exclude_pids=…)` and
+  `vrapi_tail(exclude_pids=…)` drop it, and any real emitter wins over dominance. Dominance remains the
+  tie-break, so PCVR still resolves to the client.
+- The OVR metrics CSV works standalone: the app writes its own
+  `CapturedMetrics/<pkg>#<Activity>-<stamp>.csv` per launch and `results()` pulls the newest one behind
+  the usual freshness gate, so `ovr_*` is populated.
+- `sf_latency_samples.tsv` is meaningless here and `--no-sf` removes it: a VR app renders into
+  vr_compositor HWC layers that `dumpsys SurfaceFlinger --list` cannot see, so the sampler would lock
+  onto a home-shell 2D panel and report that as "panel latency". Dropping it also removes ~1 adb
+  round-trip/s.
+- No stream is detected → no `session.json`: `quest_session_min` is null and every window is the whole
+  cell. Start the monitor when play starts if a tight window matters; the app's own lines bound the
+  meaningful `vr_api` data and the OVR CSV is per app launch anyway.
+- `vrapi_tail` answers `fps=-` when the logcat file stops growing (a headset in standby stops logging
+  VrApi entirely while adb and the Wi-Fi samplers keep working) or when the newest line is older than
+  `TAIL_FRESH_S`, so a frozen reading is never shown as live.
+- `--no-presentmon` matters: with no target the CLI otherwise starts a **system-wide** PresentMon capture
+  (~2.5 MB/min) of a PC that is not in the loop.
+- `--threads` adds `quest_threads.tsv` (`top -H` every ~2 s, top 30 threads device-wide, with thread and
+  process names) and `thermal_service.txt` (`dumpsys thermalservice` every 30 s, whose `Thermal Status:`
+  is the authoritative throttle state). This is the answer to "the counters only say it stutters": they
+  say frames are late, the thread table says *which thread* spent the time. Verified 2026-10-21 on a 40 s
+  probe (320 thread rows, the app's own `queued-work-loo com.MightyCoconut.WalkaboutMiniGolf` visible,
+  `Thermal Status: 0`). The headset logcat's tag filter (`logcat_tags` in `devices.py`, overridable
+  with `headset_log_tags`) now also carries `Unity` and `OpenXR`, which already surfaced a
+  `Unity: Timeout (2000 ms) while trying detaching primary window` warning at launch. The same sampler
+  writes `quest_mem.tsv` (`MemAvailable`, `SwapFree`, `pgmajfault`, `pswpin`, `pswpout`): a standalone
+  title held 3.0-3.4 GB PSS of a 7.9 GB device, free memory fell to 871 MB with swap in use, and
+  `kswapd0` showed up in the hardest freeze seconds — so paging has to be excluded before calling a
+  stall "compute".
+- Ignore `pc_*`, `decay_*` and `codec_stream_*` in a standalone `results.json`: they describe that absent
+  PC, and `decay_*` reads the headset's wlan0 rate — download/telemetry traffic for a native game, not
+  video.
+
 ## 7. Latency/jitter measurement recipes (the project's open gap)
 
 The matrix never measured under-load latency. Available instrument-free recipes:

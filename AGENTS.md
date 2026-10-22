@@ -16,7 +16,7 @@ against a saved baseline for the same configuration, naming the metrics that dri
 | Command | What it does |
 |---|---|
 | `Q3Diag-Wizard.exe` / `python tools/wizard.py` | the supported entry point: connect, Quick Test or Advanced, optional iperf3 link check, optional WPR trace, session, verdict, baseline prompt |
-| `python tools/cell.py monitor <run_id> [max_seconds]` | the measurement core on its own, no wizard (dashboard not served) |
+|`python tools/cell.py monitor <run_id> [max_seconds] [--no-presentmon] [--no-sf]`|the measurement core on its own, no wizard (dashboard not served); the flags are what a standalone session wants|
 | `python tools/cell.py stop <run_id>` | ask a running monitor to shut down cleanly (drops `runs/<id>/.stop`) |
 | `python tools/cell.py results <run_id>` | reduce a finished run into `results.json` (+ a row in `results.csv`) |
 | `python tools/cell.py fingerprint <run_id> [--save-baseline]` | diff against the saved baseline, or save this run as it |
@@ -41,8 +41,11 @@ run data is under `<base_dir>/runs/<run_id>/`. Nothing is uploaded anywhere.
 | `quest_net_samples.tsv` | `/proc/net/dev` and `/proc/net/snmp`: wlan0/p2p0 bytes, errors, TCP retransmits |
 | `quest_env_samples.tsv` | radio state, SoC/GPU/CPU thermals, GPU busy, mount state |
 | `sf_latency_samples.tsv`, `sf_layers.log` | SurfaceFlinger panel latency and the active layer |
+| `quest_threads.tsv` | per-thread CPU (`top -H`, top 30 threads, ~2 s) while `monitor --threads` runs: names the thread spending the frame, which the compositor counters cannot |
+| `thermal_service.txt` | `dumpsys thermalservice` every 30 s under `--threads`: its `Thermal Status:` is the authoritative throttle state |
+| `quest_mem.tsv` | `MemAvailable`/`SwapFree` + `pgmajfault`/`pswpin`/`pswpout` every ~2 s under `--threads`: whether a late frame was paged rather than computed |
 | `cm_wifi_snapshots.txt` | `dumpsys` controller-link / P2P state changes |
-| `headset_logcat.txt` | filtered headset logcat: `VrApi` compositor fps / stale / tear / early frames, predicted period, quality-scaling state (`DpuScale`) and dropped-frame counters, plus `QC2Comp` decoder stats whose instance name carries the decoded codec. The streaming-client tags (`VirtualDesktop.Android`, `OVRMediaCodec`, `VR_Engine`, `ALVR` — see `headset_log_tags`) are captured opportunistically: on the reference rig VD's own tag emits only SELinux audit lines, so client-side bitrate/connection telemetry does not exist there |
+| `headset_logcat.txt` | filtered headset logcat: `VrApi` compositor fps / stale / tear / early frames, predicted period, quality-scaling state (`DpuScale`) and dropped-frame counters, plus `QC2Comp` decoder stats whose instance name carries the decoded codec, and the app's own `Unity`/`OpenXR` messages (what a standalone title logs). The streaming-client tags (`VirtualDesktop.Android`, `OVRMediaCodec`, `VR_Engine`, `ALVR` — see `headset_log_tags`) are captured opportunistically: on the reference rig VD's own tag emits only SELinux audit lines, so client-side bitrate/connection telemetry does not exist there |
 | `pc_samples.tsv` | NVENC and GPU use, TCP retransmits, DPC/ISR per core, memory, game process CPU / working set / thread-wait histogram |
 | `ping_samples.txt` | 1 Hz PC to headset ICMP |
 | `ovr_metrics.csv` | Oculus Metrics CSV pulled from the headset |
@@ -83,6 +86,31 @@ Sizes per minute of session (see `README.md` for the table): samplers about 0.15
 6. After the session read `results.json` and `fingerprint_diff.json` first, then reach for the raw
    TSVs. `results.json` carries `pc_game_fps_note` and `headset_data_note` when something about the
    run was not measurable, which is worth reading before drawing conclusions.
+
+## Standalone play (no PC stream in the loop)
+
+Everything the tool collects on the **headset** is adb-only, so a standalone session captures the same
+files as a PCVR one: Wi-Fi MAC counters, `/proc/net` (wlan0 plus the p2p0 controller link), env/thermals/
+GPU busy, the OVR metrics CSV, the `VrApi` logcat (a running app logs its own FPS/Stale/App/GPU% line
+once per second), and PC-to-headset ping. What changes:
+
+- No stream is detected, so `session.json` never appears: `quest_session_min`/`quest_session_segments`
+  stay null and the `vr_api`/OVR windows cover the whole cell rather than one play segment. Start the
+  monitor when the player is about to start if a tight window matters.
+- The PC-side numbers describe a PC that is not in the loop — ignore `pc_samples.tsv`/`enc_util`,
+  `decay_episodes.tsv`, `codec_stream_*` and PresentMon. `decay_*` keys are especially misleading here:
+  the "delivered rate" is not video.
+- `sf_*` (SurfaceFlinger panel latency) cannot see a VR app: its layers are vr_compositor HWC layers, so
+  the sampler locks onto a home-shell 2D panel instead. Use `--no-sf`.
+- `vrshell` logs its own `VrApi` lines next to the app's, at the same 1 Hz. The reducers exclude the shell
+  pid recorded in `clock.json`, so `vr_api_*` (and the dashboard's fps tile) belong to the app.
+
+```
+python tools/cell.py monitor <run_id> 10800 --no-presentmon --no-sf --threads
+python tools/dashboard.py <run_id>        # http://127.0.0.1:8765/
+python tools/cell.py stop <run_id>
+python tools/cell.py results <run_id>
+```
 
 ## Configuration
 
