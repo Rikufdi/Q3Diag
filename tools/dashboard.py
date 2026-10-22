@@ -100,6 +100,67 @@ def _shell_pids(run_dir):
         return set()
 
 
+CPU_HISTORY = 90    # CPU samples kept for the chart; the sampler cadence is 2 s, so ~3 minutes
+
+
+def _headset_cpu(run_dir):
+    """Latest headset CPU total and per-core utilization, plus a short history for the chart.
+
+    Source is monitor's always-on `_cpu_sampler` (quest_cpu.tsv, /proc/stat deltas) -- OVR's own CPU
+    columns are only readable after a run has been reduced, which is useless live."""
+    rows = cell.read_tsv(os.path.join(run_dir, cell.ARTIFACTS["cpu"]))
+    if not rows:
+        return {}
+    last = rows[-1]
+    cores = sorted((k for k in last if k.startswith("cpu") and k != "cpu"),
+                   key=lambda k: int(k[3:] or 0))
+    out = {"cpu_core_labels": [c.replace("cpu", "C") for c in cores],
+           "cpu_cores": [last.get(c, "") for c in cores]}
+    hist = []
+    for r in rows[-CPU_HISTORY:]:
+        try:
+            hist.append(round(float(r["cpu"]), 1))
+        except (KeyError, TypeError, ValueError):
+            continue
+    out["cpu_history"] = [None] * (CPU_HISTORY - len(hist)) + hist
+    try:
+        out["cpu_pct"] = round(float(last["cpu"]), 1)
+    except (KeyError, TypeError, ValueError):
+        out["cpu_pct"] = None
+    return out
+
+
+def _pc_cpu(run_dir):
+    """Latest PC CPU total and per-core utilization, plus a short history (Sample-PC.ps1's
+    pc_cpu_pct / pc_cpu_cores, from the single `\\Processor(*)\\% Processor Time` counter call)."""
+    rows = cell.read_tsv(os.path.join(run_dir, "pc_samples.tsv"))
+    if not rows:
+        return {}
+    last = rows[-1]
+    out = {}
+    try:
+        out["pc_cpu_pct"] = round(float(last["pc_cpu_pct"]), 1)
+    except (KeyError, TypeError, ValueError):
+        out["pc_cpu_pct"] = None
+    cores = []
+    for part in (last.get("pc_cpu_cores") or "").split(","):
+        try:
+            cores.append(round(float(part), 1))
+        except ValueError:
+            continue
+    if cores:
+        out["pc_cpu_cores"] = cores
+        out["pc_core_labels"] = [f"C{i}" for i in range(len(cores))]
+    hist = []
+    for r in rows[-CPU_HISTORY:]:
+        try:
+            hist.append(round(float(r["pc_cpu_pct"]), 1))
+        except (KeyError, TypeError, ValueError):
+            continue
+    out["pc_cpu_history"] = [None] * (CPU_HISTORY - len(hist)) + hist
+    return out
+
+
 def status(run_id):
     run_dir = os.path.join(BASE, "runs", run_id)
     out = {"run_id": run_id, "updated_at": time.strftime("%H:%M:%S"),
@@ -123,6 +184,8 @@ def status(run_id):
     pc = cell.tail_row(os.path.join(run_dir, "pc_samples.tsv"))
     out.update({"enc_util_pct": pc.get("enc_util_pct"), "gpu_util_pct": pc.get("gpu_util_pct"),
                 "pc_tcp_retrans_per_s": pc.get("tcp_retrans_per_s"), "streamer_ws_mb": pc.get("streamer_ws_mb")})
+    out.update(_headset_cpu(run_dir))
+    out.update(_pc_cpu(run_dir))
     out["vrapi"] = cell.vrapi_tail(os.path.join(run_dir, cell.HEADSET_LOGCAT_NAME),
                                    exclude_pids=_shell_pids(run_dir))
     pr, pt = cell.ping_counts(os.path.join(run_dir, "ping_samples.txt"))
@@ -187,8 +250,20 @@ h1 { font-size: 16px; margin: 0 0 4px; }
            font-family: ui-sans-serif, system-ui, sans-serif; }
 .tile.warn .v { color: #c9761b; }
 .tile.bad .v { color: #b3261e; }
+.tile.wide { grid-column: 1 / -1; }
+.cores { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 6px 12px; }
+.core { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.core .cl { width: 26px; color: light-dark(#777, #8b93a0); }
+.core .cb { flex: 1; height: 6px; border-radius: 3px; overflow: hidden;
+            background: light-dark(#e6e8eb, #262a33); }
+.core .cb i { display: block; height: 100%; background: #4c8bf5; }
+.core .cb i.warn { background: #c9761b; }
+.core .cb i.bad { background: #b3261e; }
+.core .cv { width: 34px; text-align: right; color: light-dark(#444, #c8ccd3); }
+#cpu { color: light-dark(#666, #999); font-size: 11px; margin: 4px 0 12px; }
 canvas { width: 100%; height: 140px; background: light-dark(#fff, #1b1e25);
          border: 1px solid light-dark(#ddd, #2a2e37); border-radius: 8px; }
+#cpuchart { height: 90px; }
 #log { color: light-dark(#666, #999); font-size: 12px; margin-top: 8px; }
 </style></head>
 <body>
@@ -198,6 +273,8 @@ canvas { width: 100%; height: 140px; background: light-dark(#fff, #1b1e25);
 <div id="banner"></div>
 <div class="grid" id="grid"></div>
 <canvas id="chart" width="800" height="140"></canvas>
+<canvas id="cpuchart" width="800" height="90"></canvas>
+<div id="cpu">CPU % (last ~3 min): headset = solid, PC = dashed</div>
 <div id="log">waiting for data...</div>
 <script>
 // [key, short label, plain-language explanation, formatter, status-class fn]
@@ -216,6 +293,8 @@ const TILES = [
     v => v + "%", () => ""],
   ["gpu_util_pct", "PC GPU load", "Overall PC GPU utilization (0-100%), from the game rendering plus the encoder.",
     v => v + "%", () => ""],
+  ["pc_cpu_pct", "PC CPU load", "Whole-machine CPU utilization on the PC (0-100%), from the Processor(_Total) counter. In a standalone session the PC renders nothing, so this should sit near idle -- a busy PC there is something else running.",
+    v => v + "%", v => v > 85 ? "bad" : v > 70 ? "warn" : ""],
   ["pc_tcp_retrans_per_s", "PC network retransmits", "TCP segments per second the PC had to resend. Sustained spikes point to network congestion on the PC side.",
     v => v + "/s", v => v > 20 ? "bad" : v > 5 ? "warn" : ""],
   ["tcp_retrans_segs", "Headset TCP retransmits", "Total TCP segments the headset has had to resend so far this session (running total, not a rate).",
@@ -224,6 +303,8 @@ const TILES = [
     v => v, () => ""],
   ["ping_timeouts", "Ping timeouts", "PC-to-headset pings that got no reply. Should stay at 0; any timeout means the headset missed a beat.",
     v => v, v => v > 0 ? "bad" : ""],
+  ["cpu_pct", "Headset CPU load", "Whole-device CPU utilization on the headset, from /proc/stat deltas every ~2 s. This is the machine that actually renders a standalone title.",
+    v => v + "%", v => v > 85 ? "bad" : v > 70 ? "warn" : ""],
   ["soc_c", "Headset chip temp", "The headset's main chip (SoC) temperature in Celsius. Thermal throttling on Quest 3 typically starts around 89-92 C.",
     v => v + " °C", v => v > 75 ? "bad" : v > 68 ? "warn" : ""],
   ["sta_tx_power_dbm", "Headset TX power", "How much transmit power the headset's Wi-Fi radio is using, in dBm -- rises automatically as the link gets harder to maintain.",
@@ -291,10 +372,59 @@ function render(d) {
       text + '</div><div class="e">' + explain + "</div>";
     grid.appendChild(div);
   }
+  const hcpu = coreTile("Headset CPU per core", d.cpu_core_labels, d.cpu_cores,
+    "Per-core utilization on the headset (/proc/stat, ~2 s). One hot core with an idle GPU is a single-threaded workload, not a GPU limit.");
+  if (hcpu) grid.appendChild(hcpu);
+  const pcpu = coreTile("PC CPU per core", d.pc_core_labels, d.pc_cpu_cores,
+    "Per-core utilization on the PC. One pegged core while the total looks calm means a single thread is the limit.");
+  if (pcpu) grid.appendChild(pcpu);
   drawChart(d.rate_series || []);
+  drawCpu(d.cpu_history || [], d.pc_cpu_history || []);
   document.getElementById("log").textContent = d.session
     ? "session: " + (d.session.proc || "") + (d.session.end_dev_s ? "  (ended)" : "  (live)")
     : "no session detected yet";
+}
+
+function coreTile(title, labels, values, explain) {
+  if (!labels || !labels.length) return null;
+  const rows = labels.map((lab, i) => {
+    const v = parseFloat(values[i]);
+    const pct = isNaN(v) ? 0 : Math.max(2, Math.min(100, v));
+    const cls = isNaN(v) ? "" : v >= 90 ? "bad" : v >= 70 ? "warn" : "";
+    return '<div class="core"><span class="cl">' + lab + '</span><span class="cb"><i class="' +
+           cls + '" style="width:' + pct + '%"></i></span><span class="cv">' +
+           (isNaN(v) ? "-" : v.toFixed(0) + "%") + '</span></div>';
+  }).join("");
+  const div = document.createElement("div");
+  div.className = "tile wide";
+  div.innerHTML = '<div class="k">' + title + '</div><div class="cores">' + rows +
+                  '</div><div class="e">' + explain + '</div>';
+  return div;
+}
+
+function drawCpu(hs, pc) {
+  const c = document.getElementById("cpuchart");
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  const line = (ys, color, dash) => {
+    if (!ys || ys.length < 2) return;
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(dash || []);
+    ctx.beginPath();
+    let started = false;
+    ys.forEach((v, i) => {
+      if (v === null || v === undefined) { started = false; return; }
+      const x = (i / (ys.length - 1)) * c.width;
+      const y = c.height - (Math.max(0, Math.min(100, v)) / 100) * (c.height - 14) - 7;
+      if (started) { ctx.lineTo(x, y); } else { ctx.moveTo(x, y); started = true; }
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  ctx.fillStyle = "#888"; ctx.font = "11px monospace";
+  ctx.fillText("100%", 4, 12);
+  ctx.fillText("0%", 4, c.height - 4);
+  line(hs, "#4c8bf5");
+  line(pc, "#c9761b", [6, 4]);
 }
 
 function drawChart(series) {

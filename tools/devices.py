@@ -85,6 +85,8 @@ PROFILES = {
             "threads": "quest_threads.tsv",
             "thermal": "thermal_service.txt",
             "mem": "quest_mem.tsv",
+            # Written by monitor's always-on CPU sampler (see _cpu_sampler).
+            "cpu": "quest_cpu.tsv",
         },
     },
 }

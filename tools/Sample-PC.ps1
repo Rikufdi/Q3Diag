@@ -84,7 +84,7 @@ $header = [string]::Join($TAB, @("timestamp", "gpu_util_pct", "enc_util_pct", "g
     "game_name", "game_cpu_pct", "game_ws_mb", "game_prio", "game_pf_per_s",
     "game_threads", "game_thr_active", "game_thr_wait",
     "vr_match", "vr_cpu_pct", "vr_ws_mb", "streamer_cpu_pct", "streamer_ws_mb",
-    "top_procs"))
+    "top_procs", "pc_cpu_pct", "pc_cpu_cores"))
 if (-not (Test-Path $OutFile)) { Set-Content -Path $OutFile -Value $header -Encoding UTF8 }
 
 $cores = [Environment]::ProcessorCount
@@ -117,14 +117,15 @@ function Get-Counters([string]$GameExe) {
     # wildcard counter = 1171 ms), so collecting per-process data for every process is effectively free
     # and a second call would merely double the sampler's period.
     $paths = @('\TCPv4\Segments Retransmitted/sec', '\TCPv4\Segments Sent/sec', '\TCPv4\Connections Established',
-               '\Processor(*)\% DPC Time', '\Processor(*)\% Interrupt Time',
+               '\Processor(*)\% Processor Time', '\Processor(*)\% DPC Time', '\Processor(*)\% Interrupt Time',
                '\Memory\Available MBytes', '\Memory\Pages/sec', '\Memory\Page Faults/sec',
                '\Process(*)\% Processor Time', '\Process(*)\Working Set', '\Process(*)\Page Faults/sec')
     $s = (Get-Counter $paths -ErrorAction SilentlyContinue).CounterSamples
     $r = @{ retrans = ''; sent = ''; conns = ''
             dpc_mean = ''; dpc_max = ''; isr_mean = ''; isr_max = ''
             mem_avail = ''; mem_pages = ''; page_faults = ''
-            game_pf = ''; proc_cpu = @{}; proc_ws = @{} }
+            game_pf = ''; proc_cpu = @{}; proc_ws = @{}
+            cpu = ''; cpu_cores = @{} }
     $dpc = New-Object System.Collections.ArrayList
     $isr = New-Object System.Collections.ArrayList
     foreach ($c in $s) {
@@ -140,6 +141,17 @@ function Get-Counters([string]$GameExe) {
                     if ($GameExe) { $want = ([IO.Path]::GetFileNameWithoutExtension($GameExe)).ToLower() }
                     if ($want -and $inst -eq $want) { $r.game_pf = [math]::Round($c.CookedValue, 1) }
                 }
+            }
+            continue
+        }
+        if ($p -like '*% processor time*') {
+            # The Processor object, not Process(*): the process instances were consumed and skipped
+            # above. `_Total` is the machine-wide figure the dashboard shows; instances 0..N-1 are the
+            # per-core series, which is what tells a single-core storm apart from real load.
+            if ($p -match 'processor\(([^)]+)\)') {
+                $ci = $Matches[1]
+                if ($ci -eq '_total') { $r.cpu = [math]::Round($c.CookedValue, 1) }
+                else { $r.cpu_cores[$ci] = [math]::Round($c.CookedValue, 1) }
             }
             continue
         }
@@ -250,13 +262,23 @@ while ((Get-Date) -lt $deadline) {
                  Sort-Object Value -Descending | Select-Object -First 3 |
                  ForEach-Object { "$($_.Key):$([math]::Round($_.Value / $cores, 2))" }) -join ';')
     }
+    # Machine-wide and per-core CPU from the same counter call. Per-core travels as a comma list
+    # because the core count is a property of the machine, not of the TSV schema.
+    $cpuTotal = ''; $cpuCores = ''
+    if ($t) {
+        $cpuTotal = $t.cpu
+        if ($t.cpu_cores.Count) {
+            $cpuCores = (($t.cpu_cores.GetEnumerator() | Sort-Object { [int]$_.Key } |
+                          ForEach-Object { $_.Value }) -join ',')
+        }
+    }
     $line = [string]::Join($TAB, @($ts, $gpu, $enc, $mem, $clk, $temp, $pow, $retrans, $sent, $conns,
         $dpc_mean, $dpc_max, $isr_mean, $isr_max,
         $mem_avail, $mem_pages, $page_faults,
         $gname, $gcpu, $gws, $gprio, $game_pf,
         $gthr, $grun, $gwait,
         $vrMatch, $vrCpuPct, $vrWsMb, $stCpuPct, $stWsMb,
-        $top))
+        $top, $cpuTotal, $cpuCores))
     Add-Content -Path $OutFile -Encoding UTF8 -Value $line
     Start-Sleep -Milliseconds ([int]($IntervalSec * 1000))
 }

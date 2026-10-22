@@ -44,9 +44,10 @@ run data is under `<base_dir>/runs/<run_id>/`. Nothing is uploaded anywhere.
 | `quest_threads.tsv` | per-thread CPU (`top -H`, top 30 threads, ~2 s) while `monitor --threads` runs: names the thread spending the frame, which the compositor counters cannot |
 | `thermal_service.txt` | `dumpsys thermalservice` every 30 s under `--threads`: its `Thermal Status:` is the authoritative throttle state |
 | `quest_mem.tsv` | `MemAvailable`/`SwapFree` + `pgmajfault`/`pswpin`/`pswpout` every ~2 s under `--threads`: whether a late frame was paged rather than computed |
+| `quest_cpu.tsv` | headset CPU utilization, total (`cpu`) and per core (`cpu0`..`cpuN`) from `/proc/stat` deltas every ~2 s — always on during `monitor`, and what the dashboard's CPU tiles and chart read |
 | `cm_wifi_snapshots.txt` | `dumpsys` controller-link / P2P state changes |
 | `headset_logcat.txt` | filtered headset logcat: `VrApi` compositor fps / stale / tear / early frames, predicted period, quality-scaling state (`DpuScale`) and dropped-frame counters, plus `QC2Comp` decoder stats whose instance name carries the decoded codec, and the app's own `Unity`/`OpenXR` messages (what a standalone title logs). The streaming-client tags (`VirtualDesktop.Android`, `OVRMediaCodec`, `VR_Engine`, `ALVR` — see `headset_log_tags`) are captured opportunistically: on the reference rig VD's own tag emits only SELinux audit lines, so client-side bitrate/connection telemetry does not exist there |
-| `pc_samples.tsv` | NVENC and GPU use, TCP retransmits, DPC/ISR per core, memory, game process CPU / working set / thread-wait histogram |
+| `pc_samples.tsv` | NVENC and GPU use, **machine and per-core CPU** (`pc_cpu_pct`, `pc_cpu_cores`), TCP retransmits, DPC/ISR per core, memory, game process CPU / working set / thread-wait histogram |
 | `ping_samples.txt` | 1 Hz PC to headset ICMP |
 | `ovr_metrics.csv` | Oculus Metrics CSV pulled from the headset |
 | `presentmon.csv` | optional PC game frame times (PresentMon) |

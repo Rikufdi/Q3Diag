@@ -643,6 +643,7 @@ def _sampler_args(run_dir, keys=None, extra=()):
 
 THREAD_TOP_ROWS = 30      # threads kept per sample; >20 leaves room for the system's own churn
 THREAD_THERMAL_EVERY_S = 30.0
+CPU_SAMPLE_S = 2.0        # /proc/stat delta window; the dashboard's CPU chart assumes this cadence
 
 
 def _thread_sampler(ser, run_dir, stop, interval=2.0):
@@ -713,6 +714,62 @@ def _thread_sampler(ser, run_dir, stop, interval=2.0):
                 for line in dump.splitlines():
                     if "mStatus=" in line or line.strip().startswith("Thermal Status"):
                         f.write(line.strip() + "\n")
+
+
+def _cpu_snapshot(ser):
+    """{cpu|cpuN: (busy_jiffies, total_jiffies)} from /proc/stat; empty when the read fails.
+
+    iowait is counted as idle, which is how Linux's own `top` reports it: a core waiting on storage is
+    not doing compute, and counting it busy would have made every page-in stall look like load."""
+    out = {}
+    for line in _adb("-s", ser, "shell", "cat /proc/stat").splitlines():
+        parts = line.split()
+        if not parts or not parts[0].startswith("cpu"):
+            continue
+        try:
+            vals = [int(x) for x in parts[1:9]]
+        except ValueError:
+            continue
+        if len(vals) < 4:
+            continue
+        total = sum(vals)
+        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+        out[parts[0]] = (total - idle, total)
+    return out
+
+
+def _cpu_sampler(ser, run_dir, stop, interval=CPU_SAMPLE_S):
+    """Headset CPU utilization -- total and per core -- from /proc/stat deltas, always on.
+
+    The dashboard's PC tiles say nothing about a standalone session's CPU, because the headset is doing
+    all the work, and OVR's own `cpu_utilization_percentage*` columns exist only after a run is reduced,
+    never live. One small adb read per interval gives both figures; it is what turned 2026-10-21's "no
+    resource is saturated, yet frames are late" into an answer, and it costs ~1 kB an interval."""
+    path = os.path.join(run_dir, ARTIFACTS["cpu"])
+    prev = _cpu_snapshot(ser)
+    if not prev:
+        return
+    while not stop.wait(interval):
+        cur = _cpu_snapshot(ser)
+        if not cur:
+            continue
+        names = ["cpu"] + sorted((k for k in cur if k != "cpu"), key=lambda k: int(k[3:] or 0))
+        row = {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
+        for name in names:
+            if name not in prev:
+                continue
+            dt, db = cur[name][1] - prev[name][1], cur[name][0] - prev[name][0]
+            if dt > 0:
+                row[name] = f"{100.0 * db / dt:.1f}"
+        prev = cur
+        header = [k for k in [("timestamp")] + names if k in row]
+        if len(header) < 2:
+            continue
+        new = not os.path.exists(path) or os.path.getsize(path) == 0
+        with open(path, "a", encoding="utf-8") as f:
+            if new:
+                f.write("\t".join(header) + "\n")
+            f.write("\t".join(str(row.get(k, "")) for k in header) + "\n")
 
 
 def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_target=None,
@@ -848,6 +905,9 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_t
               "(drop PresentMon.exe in vendor/ to enable it).")
 
     thread_stop = threading.Event()
+    cpu_stop = threading.Event()
+    cpu_proc = threading.Thread(target=_cpu_sampler, args=(ser, run_dir, cpu_stop), daemon=True)
+    cpu_proc.start()
     thread_proc = None
     if sample_threads:
         thread_proc = threading.Thread(target=_thread_sampler, args=(ser, run_dir, thread_stop),
@@ -1004,8 +1064,10 @@ def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_t
             except subprocess.TimeoutExpired:
                 p.kill()
         thread_stop.set()
+        cpu_stop.set()
         if thread_proc is not None:
             thread_proc.join(timeout=30)
+        cpu_proc.join(timeout=30)
         # Samplers are dead, so nothing is appending any more: scrub the raw-text artifacts here as
         # well as at write time in the sampler. This is the path that also covers ping_samples.txt
         # (written by our own redirect) and any run the sampler did not exit cleanly from.
