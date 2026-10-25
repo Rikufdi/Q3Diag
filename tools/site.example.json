@@ -3,16 +3,12 @@
 
   "base_dir": "",
   "quest_ip": "",
-  "pc_ip": "",
-  "pc_nic": "",
 
   "_device_comment": "Which headset family this rig measures: a profile name from tools/devices.py (the profiles that exist are listed there; 'quest3' is the only one run against hardware so far). Empty = quest3. A profile carries what the headset-side samplers ask the device for, which artifacts they write, where its metrics files live, and which streaming client counts as a session -- so supporting a second headset is a new profile in that file, not edits to cell.py.",
   "device": "",
 
   "adb": "",
   "python": "",
-  "tshark": "",
-  "pktmon": "",
   "ffprobe": "",
 
   "vd_streamer_exe": "",
@@ -22,8 +18,6 @@
 
   "_ovr_metrics_comment": "Only an override: the headset's OVR Metrics CSV directory normally comes from the device profile in tools/devices.py (the Quest 3 path, /sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics). Set this if your device keeps that directory somewhere else.",
   "ovr_metrics_dir": "",
-
-  "elev_task": "PCVR-Elev",
 
   "_headset_log_comment": "Logcat tags streamed from the headset during a session into headset_logcat.txt. Default covers the VR runtime (VrApi, QC2Comp) and the streaming clients (VirtualDesktop.Android, OVRMediaCodec, VR_Engine, ALVR). A tag that never emits costs nothing, so leave it as-is unless a build is chatty or Air Link logs under its own tag -- then add it here (space-separated, logcat filterspecs like 'tag' or 'tag:W' are fine).",
   "headset_log_tags": "",

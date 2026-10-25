@@ -26,14 +26,9 @@ function Get-Site {
     $merged = [ordered]@{
         base_dir         = (Split-Path -Parent $toolsDir)
         quest_ip         = ''
-        pc_ip            = ''
-        pc_nic           = ''
-        elev_task        = 'PCVR-Elev'
         ovr_metrics_dir  = '/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics'
         adb              = ''
         python           = ''
-        tshark           = ''
-        pktmon           = ''
         ffprobe          = ''
         vd_streamer_exe  = ''
         vd_settings_json = ''
