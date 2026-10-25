@@ -46,7 +46,7 @@ CONFIG_PATH = os.environ.get("QUEST3_SITE") or os.path.join(PERSIST_DIR, "site.j
 EXAMPLE_PATH = os.path.join(TOOLS_DIR, "site.example.json")
 
 # Keys that name an executable or install path. `path()` resolves these.
-TOOL_KEYS = ("adb", "python", "tshark", "pktmon", "ffprobe",
+TOOL_KEYS = ("adb", "python", "ffprobe",
              "vd_streamer_exe", "vd_settings_json", "ovr_server_exe", "vd_switcher_exe")
 
 # Discovery order per key, used when the profile leaves the key empty.
@@ -60,11 +60,6 @@ _AUTO = {
         os.path.join(os.environ.get("ProgramFiles", ""), r"Android\platform-tools\adb.exe"),
     ),
     "python": (sys.executable,),
-    "tshark": (
-        os.path.join(os.environ.get("ProgramFiles", ""), r"Wireshark\tshark.exe"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", ""), r"Wireshark\tshark.exe"),
-    ),
-    "pktmon": (os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "PktMon.exe"),),
     "ffprobe": (
         os.path.join(os.environ.get("ProgramFiles", ""), r"Virtual Desktop Streamer\ffprobe.exe"),
     ),
@@ -91,8 +86,6 @@ _SCRIPTS = {
 DEFAULTS = {
     "base_dir": DEFAULT_BASE_DIR,
     "quest_ip": "",
-    "pc_ip": "",
-    "elev_task": "PCVR-Elev",
     # Which headset profile devices.py drives; empty means its own default (quest3). Present in
     # DEFAULTS so QUEST3_DEVICE works like every other key -- config() only offers env overrides for
     # keys it already knows about.

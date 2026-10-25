@@ -64,7 +64,6 @@ Streaming clients: Virtual Desktop = `VirtualDesktop.Android`, Air Link = `com.o
 | `adb push` / `shell rm` / `shell mv` | writes to the device |
 | `reboot`, `svc power`, `screenrecord`, `screencap` | disruptive or writes to device storage |
 | `pm uninstall` / `pm disable` | destructive |
-| creating/starting an elevated scheduled task (`PCVR-Elev`, `elevated-do.ps1`, `elevated-manager.ps1`) | the user deliberately removed the elevated task; NEVER re-register it or run the elevated helper without an explicit request |
 
 Also: never experiment while the user is mid-session (VD/Air Link streaming) unless the experiment *is*
 the session — killing adbd or the radio mid-stream ruins a run.
@@ -80,7 +79,7 @@ evidence goes to a file; raw outputs worth keeping go under `probe/<snapshot>/ag
 | `probe/<ts>/SUMMARY.md` | identity + capability roll-up + hottest thermal zones |
 | `probe/<ts>/agent-<slice>.md` | agent findings (this playbook's output format below) |
 | `tools/Quest-Probe.ps1` | the read-only battery; re-run for a fresh baseline |
-| `runs/<run_id>/` | per-cell streaming artifacts (cap.pcapng, OVR CSV, wifi samples) |
+| `runs/<run_id>/` | per-cell streaming artifacts (OVR CSV, wifi samples, logcat) |
 
 Findings format:
 
@@ -271,8 +270,16 @@ Rules that mattered in practice:
   keys (and reads `vr_api_logcat.txt`, a name this branch renamed, so it found no logcat at all).
   Confirmed 2026-09-23 while testing the endpoint fix: reduce a run with the branch or build that
   produced it, and diff `results.json` if you are not sure which that was.
-- The elevated pktmon task is deliberately absent — do not re-create it; `wire_*` stays null and the
-  delivered rate is reconstructed from wlan0 rx deltas instead.
+- **The packet-capture path is gone (2026-10-25).** `analyze.py`'s pcap reducer, the `cap.pcapng`/
+  `cap.etl` handling in `results()`, the `wire_*` metrics, `Run-Cell.ps1` and the elevated helpers
+  (`elevated-do.ps1`, `elevated-manager.ps1`, the `PCVR-Elev` task, and the `pktmon`/`tshark` site
+  keys) were removed with it. It was dead: no shipped path produced a capture, `wire_*` was always null,
+  and keeping it made Wireshark a hard startup requirement (issue #4). The delivered rate comes from
+  wlan0 rx deltas, which needs neither admin nor tshark. Do not reintroduce a capture path without a
+  reason and without making the dependency optional.
+- **Wireshark/tshark is not a dependency of this tool any more.** Nothing resolves it, imports it or
+  asks for it; if a future change needs a packet decoder, resolve it lazily and only on the path that
+  uses it.
 - Windows file locks: the PowerShell samplers briefly hold their TSVs open, so every reader retries
   (`_read_text`/`read_tsv`); never read those files with a single bare `open()`.
 - `hub stop` hard-kills: a monitor's `finally` may not run, so the clock/cell window is written at start.

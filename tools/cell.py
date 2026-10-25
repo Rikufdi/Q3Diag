@@ -3,7 +3,7 @@
 
 Usage:
   python cell.py serial                          # print the resolved wireless-adb endpoint
-  python cell.py capture <run_id> [duration_s]   # pktmon + device sampler + ping + VrApi logcat
+  python cell.py capture <run_id> [duration_s]   # fixed-duration device sampler + ping + VrApi logcat
   python cell.py monitor <run_id> [max_seconds]  # open-ended live-session sampling (default 10800s / 3h)
   python cell.py stop <run_id>                   # ask a running `monitor <run_id>` to shut down cleanly
                                                   # (same effect as Ctrl+C; use when it isn't attached to
@@ -38,15 +38,11 @@ Per-cell device-side instrumentation (all optional files, written into runs/<run
 """
 import sys, os, re, time, json, csv, socket, subprocess, threading
 import qsite
-import analyze
 import devices
 
 ADB = qsite.path("adb")
 QUEST_IP = qsite.get("quest_ip")
 BASE = qsite.base_dir()
-TASK = qsite.get("elev_task", "PCVR-Elev")
-RES = os.path.join(qsite.TOOLS_DIR, "elev-do-res.txt")
-CMD = os.path.join(qsite.TOOLS_DIR, "elev-do-cmd.txt")
 
 # Which headset family this run targets, and the names its samplers write -- see devices.py. The
 # Quest's artifact names stay exactly as they were: they are in every existing run folder and in the
@@ -120,7 +116,7 @@ def format_mb(mb):
 # results.csv schema: identity columns + everything the reductions can produce.
 ID_COLS = ["run_id", "stack", "codec", "bitrate_mbps", "content", "band"]
 MEAS_COLS = [
-    "wire_tx_mbps", "wire_rx_mbps", "wire_pkts_per_s", "retry_rate_pct", "lost_rate_pct",
+    "retry_rate_pct", "lost_rate_pct",
     "retry_rate_p90_pct", "retry_rate_max_pct", "retry_bursts", "retry_bursts_pct",
     "retry_lost_packets", "retry_burst_lost_packets", "retry_burst_rssi_dbm_min",
     "retry_burst_link_mbps_min", "retry_counter_resets",
@@ -774,7 +770,8 @@ def _cpu_sampler(ser, run_dir, stop, interval=CPU_SAMPLE_S):
 
 def monitor(run_id, max_seconds=10800, status_every=30, stack=None, presentmon_target=None,
             presentmon_hint=None, presentmon_capture=True, sample_sf=True, sample_threads=False):
-    """Open-ended monitoring of a live session (no pktmon: the elevated task is intentionally absent).
+    """Open-ended monitoring of a live session (device-side samplers only: the packet-capture path was
+    removed in v0.2.x, so there is no pktmon/elevated task involved).
     Samples until killed, stopped (`cell.py stop <run_id>` or Ctrl+C), or max_seconds elapses; prints one
     status line per status_every, and detects the streaming client's start/stop so the reduction can
     window on the session instead of the monitor.
@@ -1233,9 +1230,8 @@ def _adopt_serial(ser):
     """Keep QUEST_IP pointing at the headset the resolved endpoint actually belongs to.
 
     site.json's quest_ip is only ever correct for the network the headset was last paired on, and the
-    operator changes networks. It feeds the 1 Hz ping in monitor()/capture() and the wire-window
-    analysis in analyze.reduce_cell(), so a stale value there does not fail loudly -- it records a
-    session's worth of ping timeouts and attributes the wire window to the wrong address. A wireless
+    operator changes networks. It feeds the 1 Hz ping in monitor()/capture(), so a stale value does not
+    fail loudly -- it records a session's worth of ping timeouts against the wrong address. A wireless
     endpoint carries the IP directly; a USB-only endpoint gets it read off the device. Persisted the
     same way the wizard persists its discovery, so the next run starts from the right place."""
     global QUEST_IP
@@ -1311,21 +1307,6 @@ def shell_pids(ser):
     return {int(x) for x in out if x.isdigit()}
 
 
-def elev(cmd):
-    if os.path.exists(RES):
-        os.remove(RES)
-    with open(CMD, "w") as f:
-        f.write(cmd)
-    r = subprocess.run(["schtasks", "/run", "/tn", TASK], capture_output=True, text=True, errors="replace")
-    if r.returncode != 0:
-        return "NO-TASK: " + (r.stderr or r.stdout).strip().replace("\n", " ")[:200]
-    for _ in range(40):
-        if os.path.exists(RES):
-            return open(RES, encoding="utf-8-sig").read().strip()
-        time.sleep(1)
-    return "TIMEOUT"
-
-
 # ---------------------------------------------------------------- clock / layers
 def clock_sample(ser):
     """headset wall clock vs PC wall clock (the headset is ~0.5 s behind; needed to align
@@ -1385,8 +1366,6 @@ def capture(run_id, duration=150):
     sf_layer = find_sf_layer(ser)
     print("sf layer:", sf_layer or "(none advancing -> SurfaceFlinger sampling skipped)")
 
-    print("pktmon-start:", elev(f"pktmon-start {run_dir}"))
-
     sf_flag, sf_key = DEVICE["sampler"]["sf"]
     sampler = subprocess.Popen(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SAMPLER,
@@ -1415,7 +1394,6 @@ def capture(run_id, duration=150):
     print(f"capturing {duration}s...")
     time.sleep(duration)
 
-    print("pktmon-stop:", elev(f"pktmon-stop {run_dir}"))
     for p in (logcat, ping):
         p.terminate()
         try:
@@ -2807,17 +2785,6 @@ def results(run_id, overlay_path=None):
     if overlay_path and os.path.exists(overlay_path):
         overlay = json.load(open(overlay_path))
 
-    # Direct call, not a sys.executable subprocess: the latter breaks under a frozen/bundled build the
-    # same way dashboard.py's old subprocess launch did (see its make_server() docstring) -- there is
-    # no plain python.exe to hand a sibling .py file to when sys.executable is the bundled exe itself.
-    # Only reduce a capture when one actually exists. reduce_cell() is the phase-1 pcap path; a
-    # `monitor` session (every wizard run) never writes one, and calling it unconditionally made the
-    # end of every such run print `{"error": "no capture found in ..."}` -- which reads as "the run
-    # failed", immediately before the real results line.
-    has_capture = any(os.path.exists(os.path.join(run_dir, f)) for f in ("cap.pcapng", "cap.etl"))
-    w = analyze.reduce_cell(os.path.join(BASE, "runs"), run_id, quest_ip=QUEST_IP, window="30,150") \
-        if has_capture else {}
-
     # wifi counter deltas (MAC layer, headset TX direction)
     rows = read_tsv(os.path.join(run_dir, ARTIFACTS["wifi"]))
     if len(rows) < 2:
@@ -2886,8 +2853,7 @@ def results(run_id, overlay_path=None):
         ovr.update(ovr_window(ovr_csv, tail_s=tail_s))
 
     res = {
-        "wire_tx_mbps": w.get("wire_tx_mbps"), "wire_rx_mbps": w.get("wire_rx_mbps"),
-        "wire_pkts_per_s": w.get("wire_pkts_per_s"), "transport": "tcp",
+        "transport": "tcp",
         "quest_tx_packets_delta": tx, "quest_retried_tx_delta": tr,
         "quest_lost_tx_delta": tl, "quest_rx_packets_delta": rx,
         "retry_rate_pct": retry, "lost_rate_pct": lost,
@@ -2999,7 +2965,7 @@ def results(run_id, overlay_path=None):
         csv_upsert(os.path.join(BASE, "results.csv"), id_cols, meas_cols,
                    {**{c: s.get(c) for c in id_cols}, **res})
     print("wrote results.json" + ("" if is_private_run(run_id) else " + results.csv"))
-    print("wire_tx_mbps:", res["wire_tx_mbps"], "retry:", res["retry_rate_pct"],
+    print("retry:", res["retry_rate_pct"],
           "ping_p95:", res.get("ping_rtt_p95_ms"), "vr_api_fps:", res.get("vr_api_fps_mean"),
           "stale:", res.get("vr_api_stale_total"))
 

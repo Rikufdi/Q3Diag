@@ -9,7 +9,7 @@ release/dist/Q3Diag-Wizard-<version>-win64.zip) containing:
   Q3Diag-Wizard.exe          entry point -- packages tools/entry.py (which imports the wizard behind a
                               guard, so a failure *before* it starts is still printed and paused) plus
                               everything the wizard imports (cell.py, qsite.py, devices.py,
-                              dashboard.py, analyze.py) via PyInstaller
+                              dashboard.py) via PyInstaller
   _internal/                 bundled Python runtime + the .ps1 samplers + site.example.json
   adb.exe, AdbWinApi.dll,
   AdbWinUsbApi.dll           vendored Android platform-tools (see THIRD_PARTY_NOTICES.md) --

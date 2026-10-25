@@ -1,120 +1,21 @@
 #!/usr/bin/env python3
-"""analyze.py — PCVR Wi-Fi diagnostics reduction.
+"""analyze.py — PCVR Wi-Fi diagnostics reporting.
 
-Subcommands:
-  cell   <runs_dir> <run_id> [--quest-ip IP] [--pc-ip IP] [--window START,END]
-         Reduce one run's cap.pcapng to wire UDP TX/RX Mbps + packets/s over the
-         measurement window. Prints a JSON object to stdout.
-
+Subcommand:
   report <runs_dir> [--out report.md]
          Read runs/*/settings.json + results.json, quest_wifi_samples.tsv and
          ovr_metrics.csv, and write the final report.
+
+The pcap reduction that used to live here (the `cell` subcommand, which parsed a captured
+cap.pcapng/cap.etl with tshark into wire UDP TX/RX Mbps) was removed on 2026-10-25 along with the
+elevated pktmon plumbing that produced those captures: no shipped path recorded packets, the metric
+was permanently null, and keeping it meant requiring Wireshark to start the app (issue #4). The
+delivered rate is reconstructed from wlan0 rx deltas instead, which needs neither admin nor tshark.
 """
 import csv
 import json
 import os
-import subprocess
 import sys
-
-import qsite
-
-PC_IP_DEFAULT = qsite.get("pc_ip")
-_TSHARK = None
-
-
-def find_tshark():
-    """tshark's path, resolved the first time a capture is actually reduced -- never at import.
-
-    This used to be `TSHARK = qsite.path("tshark")` at module scope, and the import chain is wizard ->
-    cell -> analyze, so it ran on *every* launch: a machine without Wireshark died with "could not
-    locate 'tshark'" before the first prompt, taking the console window with it (issue #4, "app closes
-    instantly"). Nothing on the normal path needs tshark at all -- reduce_cell() only reaches it when a
-    run folder holds a cap.pcapng, and the current capture path does not produce one (the elevated
-    pktmon task is deliberately absent; wire_* is reconstructed from wlan0 deltas instead).
-
-    Resolving here keeps the legacy pcap reduction working for anyone who still has such a capture,
-    with qsite.path()'s own instructions if tshark really is missing."""
-    global _TSHARK
-    if _TSHARK is None:
-        _TSHARK = qsite.path("tshark")
-    return _TSHARK
-
-
-def tshark_fields(cap, fields, display_filter=None):
-    cmd = [find_tshark(), "-r", cap, "-T", "fields"]
-    for f in fields:
-        cmd += ["-e", f]
-    if display_filter:
-        cmd += ["-Y", display_filter]
-    out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    return out.stdout
-
-
-def reduce_cell(runs_dir, run_id, quest_ip=None, pc_ip=PC_IP_DEFAULT, window=None):
-    run_dir = os.path.join(runs_dir, run_id)
-    cap = os.path.join(run_dir, "cap.pcapng")
-    if not os.path.exists(cap):
-        # fall back to .etl (no pcap conversion done yet)
-        cap = os.path.join(run_dir, "cap.etl")
-    if not os.path.exists(cap):
-        err = {"error": "no capture found in " + run_dir}
-        print(json.dumps(err))
-        return err
-
-    txt = tshark_fields(cap, ["frame.time_relative", "ip.src", "ip.dst", "tcp.len", "udp.length"], "tcp || udp")
-    lo, hi = (0.0, float("inf"))
-    if window:
-        parts = [float(x) for x in window.split(",")]
-        if len(parts) == 2:
-            lo, hi = parts[0], parts[1]
-
-    tx_bytes = 0.0
-    rx_bytes = 0.0
-    tx_pkts = 0
-    rx_pkts = 0
-    t_min = t_max = None
-    for line in txt.splitlines():
-        fields = line.split("\t")
-        if len(fields) < 5:
-            continue
-        try:
-            t = float(fields[0])
-            src = fields[1]
-            dst = fields[2]
-            tcp_len = float(fields[3]) if fields[3] else 0.0
-            udp_len = float(fields[4]) if fields[4] else 0.0
-            length = tcp_len + udp_len
-        except ValueError:
-            continue
-        if not (lo <= t <= hi):
-            continue
-        if t_min is None or t < t_min:
-            t_min = t
-        if t_max is None or t > t_max:
-            t_max = t
-        if quest_ip and dst == quest_ip:
-            tx_bytes += length
-            tx_pkts += 1
-        elif quest_ip and src == quest_ip:
-            rx_bytes += length
-            rx_pkts += 1
-        elif pc_ip and src == pc_ip:
-            tx_bytes += length
-            tx_pkts += 1
-        elif pc_ip and dst == pc_ip:
-            rx_bytes += length
-            rx_pkts += 1
-
-    dur = (t_max - t_min) if (t_min is not None and t_max is not None and t_max > t_min) else 1.0
-    result = {
-        "wire_tx_mbps": round(tx_bytes * 8 / dur / 1e6, 2),
-        "wire_rx_mbps": round(rx_bytes * 8 / dur / 1e6, 2),
-        "wire_pkts_per_s": round((tx_pkts + rx_pkts) / dur, 1),
-        "window_start_s": round(t_min, 3) if t_min is not None else None,
-        "window_end_s": round(t_max, 3) if t_max is not None else None,
-    }
-    print(json.dumps(result))
-    return result
 
 
 def _load_json(p):
@@ -202,27 +103,11 @@ def main():
         return
     cmd = sys.argv[1]
     runs_dir = sys.argv[2]
-    if cmd == "cell":
-        run_id = sys.argv[3] if len(sys.argv) > 3 else None
-        quest_ip = None
-        window = None
-        args = sys.argv[4:]
-        i = 0
-        while i < len(args):
-            if args[i] == "--quest-ip" and i + 1 < len(args):
-                quest_ip = args[i + 1]
-                i += 2
-            elif args[i] == "--window" and i + 1 < len(args):
-                window = args[i + 1]
-                i += 2
-            else:
-                i += 1
-        reduce_cell(runs_dir, run_id, quest_ip=quest_ip, window=window)
-    elif cmd == "report":
+    if cmd == "report":
         out = sys.argv[3] if len(sys.argv) > 3 else os.path.join(runs_dir, "report.md")
         build_report(runs_dir, out)
     else:
-        print("unknown command: " + cmd)
+        print(__doc__)
 
 
 if __name__ == "__main__":
