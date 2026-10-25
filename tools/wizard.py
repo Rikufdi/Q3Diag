@@ -776,6 +776,14 @@ def main():
     except KeyboardInterrupt:
         print("\ncancelled")
         exit_code = 1
+    except SystemExit as e:
+        # qsite.config()/path() raise SystemExit (a BaseException, so it used to sail past every
+        # handler below) for a broken site.json or a missing required tool: the message printed, then a
+        # double-clicked exe closed the console the instant the process exited -- the "window appears for
+        # one frame and closes, I think it says something about tshark" of issue #4. A fatal startup
+        # error deserves the same read-then-press-Enter treatment as any other.
+        print(f"\nerror: {e}" if str(e) else "\nstopped")
+        exit_code = 1
     except RuntimeError as e:
         print(f"\nerror: {e}")
         exit_code = 1

@@ -6,8 +6,10 @@
 Produces release/dist/Q3Diag-Wizard/ (a folder you can zip and hand to someone -- also written as
 release/dist/Q3Diag-Wizard-<version>-win64.zip) containing:
 
-  Q3Diag-Wizard.exe          entry point -- packages tools/wizard.py plus everything it imports
-                              (cell.py, qsite.py, devices.py, dashboard.py, analyze.py) via PyInstaller
+  Q3Diag-Wizard.exe          entry point -- packages tools/entry.py (which imports the wizard behind a
+                              guard, so a failure *before* it starts is still printed and paused) plus
+                              everything the wizard imports (cell.py, qsite.py, devices.py,
+                              dashboard.py, analyze.py) via PyInstaller
   _internal/                 bundled Python runtime + the .ps1 samplers + site.example.json
   adb.exe, AdbWinApi.dll,
   AdbWinUsbApi.dll           vendored Android platform-tools (see THIRD_PARTY_NOTICES.md) --
@@ -206,7 +208,7 @@ def _build():
     pyinstaller_work = os.path.join(BUILD_DIR, "pyinstaller")
     args = [
         sys.executable, "-m", "PyInstaller",
-        os.path.join(TOOLS_DIR, "wizard.py"),
+        os.path.join(TOOLS_DIR, "entry.py"),
         "--name", APP_NAME,
         "--onedir", "--console", "--noconfirm", "--noupx",
         # Both of these are known, well-documented mitigations for antivirus false positives on

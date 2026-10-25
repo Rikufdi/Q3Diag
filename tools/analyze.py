@@ -18,12 +18,26 @@ import sys
 
 import qsite
 
-TSHARK = qsite.path("tshark")
 PC_IP_DEFAULT = qsite.get("pc_ip")
+_TSHARK = None
 
 
 def find_tshark():
-    return TSHARK
+    """tshark's path, resolved the first time a capture is actually reduced -- never at import.
+
+    This used to be `TSHARK = qsite.path("tshark")` at module scope, and the import chain is wizard ->
+    cell -> analyze, so it ran on *every* launch: a machine without Wireshark died with "could not
+    locate 'tshark'" before the first prompt, taking the console window with it (issue #4, "app closes
+    instantly"). Nothing on the normal path needs tshark at all -- reduce_cell() only reaches it when a
+    run folder holds a cap.pcapng, and the current capture path does not produce one (the elevated
+    pktmon task is deliberately absent; wire_* is reconstructed from wlan0 deltas instead).
+
+    Resolving here keeps the legacy pcap reduction working for anyone who still has such a capture,
+    with qsite.path()'s own instructions if tshark really is missing."""
+    global _TSHARK
+    if _TSHARK is None:
+        _TSHARK = qsite.path("tshark")
+    return _TSHARK
 
 
 def tshark_fields(cap, fields, display_filter=None):
